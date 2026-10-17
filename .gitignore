@@ -1,0 +1,15 @@
+# Rust
+server/target/
+
+# Emacs
+*.elc
+*~
+\#*\#
+.\#*
+.DS_Store
+
+# Logs
+*.log
+
+# Testing
+test-data/

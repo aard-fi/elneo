@@ -1,0 +1,34 @@
+[package]
+name = "elneo-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# rustls via the aws-lc-rs provider: the only TLS backend in matrix-sdk 0.19
+# (needs cmake + a C toolchain to build).  bundled-sqlite: builds SQLite into
+# the binary, no system libsqlite3 needed.
+matrix-sdk = { version = "0.19", default-features = false, features = ["e2e-encryption", "automatic-room-key-forwarding", "sqlite", "bundled-sqlite", "rustls-aws-lc-rs"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+futures = "0.3"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+directories = "5"
+base64 = "0.22"
+# Digest tail for over-long media cache keys (see `sanitize`).
+sha2 = "0.10"
+mime = "0.3"
+mime_guess = "2"
+# Turns on ruma's poll module (m.poll.start/response/end): features unify
+# additively across the graph, so this gates them on through
+# matrix_sdk::ruma too, even though matrix-sdk itself never sets the flag.
+ruma = { version = "0.17", features = ["unstable-msc3381"] }
+# Query-string building for the raw hierarchy GET (the crate is already
+# pinned through matrix-sdk's graph; this only names it).
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  server:
+    name: build server (${{ matrix.os }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: linux
+            arch: arm64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+          - os: windows
+            arch: x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows
+            arch: arm64
+            runner: windows-latest
+            target: aarch64-pc-windows-msvc
+          - os: macos
+            arch: arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v7
+
+
+      - name: Install Linux Cross-Compilation Dependencies
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Install Native Build Dependencies (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential
+
+      - name: Setup Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Run Tests
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: make server-test
+
+      - name: Check formatting
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo fmt --check --manifest-path server/Cargo.toml
+
+      - name: Run Clippy
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo clippy --all-targets --manifest-path server/Cargo.toml -- -D warnings
+
+      - name: Release build
+        shell: bash
+        env:
+          # Tells cargo to use the aarch64 linker when cross-compiling Linux ARM64
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --manifest-path server/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Prepare Artifacts
+        shell: bash
+        run: |
+          mkdir -p dist
+          EXT=""
+          if [ "${{ matrix.os }}" = "windows" ]; then EXT=".exe"; fi
+
+          # Search both potential root and nested target directories
+          FOUND=false
+          for dir in "target/${{ matrix.target }}/release" "server/target/${{ matrix.target }}/release"; do
+            if [ -d "$dir" ]; then
+              # Look for any file that matches typical binary patterns (ignoring .d dependency files, .pdb symbols, etc.)
+              for file in "$dir"/*${EXT}; do
+                if [ -f "$file" ] && [[ ! "$file" == *.d ]] && [[ ! "$file" == *.pdb ]] && [[ ! "$file" == *.fingerprint* ]]; then
+                  cp "$file" dist/elneo-server-${{ matrix.os }}-${{ matrix.arch }}${EXT}
+                  echo "Successfully packaged: $file -> dist/elneo-server-${{ matrix.os }}-${{ matrix.arch }}${EXT}"
+                  FOUND=true
+                  break 2
+                fi
+              done
+            fi
+          done
+
+          if [ "$FOUND" = false ]; then
+            echo "Error: Could not locate the compiled binary artifact."
+            exit 1
+          fi
+
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: elneo-server-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+
+  # Tagged v* refs get the five built binaries published as a GitHub
+  # release, alongside SHA256SUMS — the checksum file elneo looks up when
+  # it offers to fetch a matching server (see lisp/elneo-server.el).
+  publish:
+    name: publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: server
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download built binaries
+        uses: actions/download-artifact@v7
+        with:
+          pattern: elneo-server-*
+          merge-multiple: true
+          path: dist
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum elneo-server-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --generate-notes \
+            dist/*
