@@ -1437,6 +1437,10 @@ verification and decrypted history do not carry over (use
 `elneo-recover-keys' with the saved recovery key to restore room
 keys on the new session).
 
+This removes PROFILE's presence from THIS machine only.  The
+Matrix account itself is not deactivated: it keeps its rooms and
+whatever other sessions still exist.
+
 With NO-CONFIRM non-nil, skip the confirmation prompt (used by
 `elneo-forget-all-profiles', which confirms once for all)."
   (interactive (progn (elneo--accounts-load)
@@ -1444,6 +1448,7 @@ With NO-CONFIRM non-nil, skip the confirmation prompt (used by
                              "Profile: "
                              (mapcar #'car elneo-accounts)
                              nil t))))
+  (elneo--accounts-load)
   ;; The prompt must fit an 80-column minibuffer: if `(yes or no)' is
   ;; pushed off the visible edge, the command looks hung while it is
   ;; really waiting at the confirmation.
@@ -1451,17 +1456,106 @@ With NO-CONFIRM non-nil, skip the confirmation prompt (used by
             (yes-or-no-p (format "Forget profile %s (logout, stop \
 daemon, delete data)? "
                                  profile)))
-    (when (elneo-server-live-p profile)
-      (elneo-server--call profile '((@type . "logout")) nil))
-    (elneo-server-stop profile)
-    (ignore-errors
-      (delete-directory (elneo--daemon-data-dir profile) 'recursive))
-    (setq elneo-accounts (assoc-delete-all profile elneo-accounts #'equal))
-    ;; Emacs-side state for the profile: rooms (announced :removed),
-    ;; open room buffers, pending verification flows, recovery state.
-    (elneo--profile-local-cleanup profile)
-    (elneo--accounts-save)
-    (message "Matrix [%s] forgotten" profile)))
+    (if (elneo-server-live-p profile)
+        (elneo--forget-after-logout profile)
+      ;; No live daemon: its logout command is unreachable.  The
+      ;; token in the data dir's session.json would otherwise stay
+      ;; valid on the homeserver for good — invalidate it directly
+      ;; before the directory (and with it the token) is gone.
+      (elneo--forget-logout-session-file profile)
+      (elneo--forget-teardown profile))))
+
+(defun elneo--forget-after-logout (profile)
+  "Gate PROFILE's teardown on the daemon's logout ack.
+The logout is one HTTP round trip; a fire-and-forget call plus the
+immediate stop killed the daemon before the homeserver ever
+revoked the token — forgotten profiles kept living on the server
+as unrevoked devices with a live session.  Wait for the ack
+(bounded: a wedged daemon must not wedge the forget), warn when
+the confirmation is missing, then tear down."
+  (let ((done nil) (ok nil) (note nil))
+    (elneo-server--call profile '((@type . "logout"))
+                        (lambda (_p event)
+                          (setq done t
+                                ok (alist-get '@ok event nil nil #'equal)
+                                note (unless ok
+                                       (elneo-server--error-string event)))))
+    (let ((deadline (+ (float-time) 10)))
+      (while (and (not done) (< (float-time) deadline))
+        (accept-process-output (elneo-server--get-process profile) 1)))
+    (if ok
+        (message "Matrix [%s] logged out server-side" profile)
+      (message "Matrix [%s] logout not confirmed (%s) — the homeserver \
+may still know this device"
+               profile
+               (or note "timed out")))
+    (elneo--forget-teardown profile)))
+
+(defun elneo--forget-logout-session-file (profile)
+  "Best-effort server logout for PROFILE's stored-but-offline session.
+The daemon is not running, so its `logout' command is unreachable;
+read the access token straight from the data dir's session.json and
+invalidate it on the remembered homeserver.  Anything missing, or
+any failure here, only degrades to the old behavior and never
+blocks the teardown that follows."
+  (let* ((file (expand-file-name "session.json"
+                                 (elneo--daemon-data-dir profile)))
+         (session (when (file-exists-p file)
+                    (ignore-errors (json-read-file file))))
+         (token (alist-get 'access_token (alist-get 'tokens session))))
+    (when (and (stringp token) (not (string-empty-p token)))
+      (let ((homeserver (plist-get
+                         (alist-get profile elneo-accounts nil nil #'equal)
+                         :homeserver)))
+        (cond
+         ((not (stringp homeserver))
+          (message "Matrix [%s]: no homeserver remembered — its device \
+was not logged out" profile))
+         (t
+          (require 'url)
+          (message "Matrix [%s]: logging the stored session out on \
+%s..." profile homeserver)
+          (let ((url-request-method "POST")
+                (url-request-extra-headers
+                 (list (cons "Authorization" (concat "Bearer " token))))
+                (url-request-data "{}"))
+            (with-timeout (10
+                           (message "Matrix [%s] stale-session logout \
+timed out" profile))
+              (with-current-buffer
+                  (url-retrieve-synchronously
+                   (concat homeserver "/_matrix/client/v3/logout"))
+                (let ((status (progn (goto-char (point-min))
+                                     (buffer-substring
+                                      (point-min)
+                                      (line-beginning-position 2)))))
+                  (kill-buffer)
+                  ;; Spec-wise logout answers 200 or 401; both mean no
+                  ;; live token is left over.
+                  (cond
+                   ((string-match-p "HTTP/[0-9.]+ 401" status)
+                    (message "Matrix [%s] stored session was already \
+logged out" profile))
+                   ((string-match-p "HTTP/[0-9.]+ 2[0-9][0-9]" status)
+                    (message "Matrix [%s] logged out server-side" profile))
+                   (t
+                    (message "Matrix [%s] stale-session logout failed: %s"
+                             profile
+                             (string-trim status))))))))))))))
+
+(defun elneo--forget-teardown (profile)
+  "The machine-side half of forgetting PROFILE.
+Runs after the logout is as sure as it can be: daemon stopped, the
+per-profile data directory deleted and the registration dropped."
+  (elneo-server-stop profile)
+  (ignore-errors
+    (delete-directory (elneo--daemon-data-dir profile) 'recursive))
+  (setq elneo-accounts (assoc-delete-all profile elneo-accounts #'equal))
+  ;; Emacs-side state for the profile: rooms (announced :removed),
+  ;; open room buffers, pending verification flows, recovery state.
+  (elneo--profile-local-cleanup profile)
+  (elneo--accounts-save)
+  (message "Matrix [%s] forgotten" profile))
 
 ;;;###autoload
 (defun elneo-forget-all-profiles ()
