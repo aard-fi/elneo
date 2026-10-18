@@ -13,3 +13,4 @@ server/target/
 
 # Testing
 test-data/
+/lisp/elneo-autoloads.el

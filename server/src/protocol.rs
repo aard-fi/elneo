@@ -115,7 +115,13 @@ use serde::{Deserialize, Serialize};
 ///    when the list would actually change; re-reading happens from the state
 ///    echo (`updateRoom`).  The client marks pinned messages and lists them in
 ///    the room overview
-pub const PROTOCOL_VERSION: u32 = 22;
+/// 23: the `updateVerificationNeeded` event: the background crypto bring-up
+///    found an identity this session cannot adopt alone (no secret storage,
+///    or storage but no recovery key on this machine) and says so instead of
+///    returning silently — Emacs offers the verify/recovery flows once per
+///    profile per session.  Old daemons never emit it and old clients ignore
+///    it, so the activation minimum stays put.
+pub const PROTOCOL_VERSION: u32 = 23;
 
 /// serde `skip_serializing_if` helper: false-valued createRoom flags
 /// (public, is_direct) stay off the wire — deserialization defaults
@@ -1006,6 +1012,16 @@ pub enum Event {
     /// drives the bar's `Verify: ACCOUNT` row.
     #[serde(rename = "updateCrossSigningStatus")]
     UpdateCrossSigningStatus { enabled: bool, trusted: bool },
+    /// A new session found an identity it cannot adopt on its own:
+    /// the account is cross-signed on the homeserver, but this machine
+    /// holds no way to trust it (no secret storage to recover from, or
+    /// storage without a stored recovery key here).  `reason` is
+    /// `"no-storage"` (only verifying with another device helps) or
+    /// `"no-recovery-key"` (entering the account's recovery key also
+    /// would).  Emacs prompts once per profile per session, offering
+    /// those flows.
+    #[serde(rename = "updateVerificationNeeded")]
+    UpdateVerificationNeeded { reason: String },
     /// Upsert one room's full summary (room bar sort/search/avatar
     /// state, invite display, the works).  Invited rooms ride this
     /// too, with `room_state: "invited"` in the summary.
@@ -2291,6 +2307,12 @@ mod tests {
                 json!({"@type": "updateCrossSigningStatus", "enabled": true, "trusted": true}),
             ),
             (
+                Event::UpdateVerificationNeeded {
+                    reason: "no-recovery-key".into(),
+                },
+                json!({"@type": "updateVerificationNeeded", "reason": "no-recovery-key"}),
+            ),
+            (
                 Event::UpdateRoom {
                     profile: "main".into(),
                     room: room.clone(),
@@ -2984,7 +3006,7 @@ mod tests {
                     release: RELEASE_VERSION.into(),
                 },
                 json!({
-                    "@type": "daemonInfo", "protocol": 22,
+                    "@type": "daemonInfo", "protocol": 23,
                     "release": env!("CARGO_PKG_VERSION")
                 }),
             ),

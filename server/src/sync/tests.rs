@@ -2007,7 +2007,7 @@ fn image_filter_keeps_pictures_and_stickers() {
         }
     }
     // Oldest->newest, as `handle_get_room_messages' orders entries.
-    let page = vec![
+    let page = [
         msg_entry("m.text"),
         msg_entry("m.image"),
         msg_entry("m.sticker"),

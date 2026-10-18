@@ -665,8 +665,10 @@ fn store_recovery_key(
 /// session does not trust, plus secret storage plus a stored recovery
 /// key (an earlier bootstrap here), adopts that key silently — the
 /// re-login needs no device-verification dance.  Everything else keeps
-/// the manual flows: the daemon never replaces keys set up elsewhere,
-/// and a silent background step must never speak over the user.
+/// the manual flows — the daemon never replaces keys set up elsewhere,
+/// and a silent background step must never speak over the user — but
+/// now says so through `updateVerificationNeeded`, so Emacs can offer
+/// those flows instead of leaving a never-trusted session unexplained.
 pub(crate) async fn auto_crypto_onboarding(daemon: &SharedDaemon, client: &Client) {
     let encryption = client.encryption();
     let Some(user_id) = client.user_id().map(|u| u.to_owned()) else {
@@ -743,7 +745,12 @@ pub(crate) async fn auto_crypto_onboarding(daemon: &SharedDaemon, client: &Clien
             if !enabled {
                 // Identity unadopted, nothing stored to adopt it from:
                 // the manual flows (verify this device, or recover from
-                // a key the user holds) as always.
+                // a key the user holds) as always.  But a session that
+                // never becomes trusted is a silent failure from the
+                // user's side — say so, and Emacs offers those flows.
+                daemon.emit(Event::UpdateVerificationNeeded {
+                    reason: "no-storage".into(),
+                });
                 return;
             }
             let key = std::fs::read_to_string(recovery_key_path(&daemon.data_dir))
@@ -751,6 +758,11 @@ pub(crate) async fn auto_crypto_onboarding(daemon: &SharedDaemon, client: &Clien
                 .map(|key| key.trim().to_owned())
                 .filter(|key| !key.is_empty());
             let Some(key) = key else {
+                // Recovery set up on the homeserver, but this machine
+                // was never handed the key: only the user has it.
+                daemon.emit(Event::UpdateVerificationNeeded {
+                    reason: "no-recovery-key".into(),
+                });
                 return;
             };
             info!("Adopting the account's stored recovery key for a fresh session");
