@@ -256,10 +256,21 @@ accept the request on that device."
                   (or (plist-get record :device-id) "?"))
           'elneo-verify-status)))
       ("ready"
-       (elneo-verify--log profile
-                          (format "Ready. Starting emoji verification...")
-                          'elneo-verify-status)
-       (elneo-verification-start-sas profile (plist-get record :flow-id)))
+       ;; The SAS start is one-sided: whoever created the request also
+       ;; moves it into SAS.  Both sides firing startSas hands the flow
+       ;; two m.key.verification.start events — the SDK then replaces
+       ;; or ignores one per a lexicographic coin flip, and the emoji
+       ;; comparison never gets a fair start (live-tested: two "waiting
+       ;; for keys" lines, then m.timeout).  The responder merely waits;
+       ;; its daemon accepts the incoming start, and the emojis arrive.
+       (if (plist-get record :we-started)
+           (progn
+             (elneo-verify--log profile
+                                "Ready. Starting emoji verification..."
+                                'elneo-verify-status)
+             (elneo-verification-start-sas profile (plist-get record :flow-id)))
+         (elneo-verify--log
+          profile "Ready — waiting for the other side to start the flow...")))
       ("sas_started"
        (elneo-verify--log profile "SAS flow started; waiting for keys..."))
       ("sas_confirmed"

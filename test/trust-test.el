@@ -212,5 +212,30 @@ explicitly, under the id they picked."
       (remhash (cons "mxtest" "!roomD") elneo-room--buffers)
       (when (buffer-live-p buf) (kill-buffer buf))))
 
+  ;; The SAS start fires one-sided: only the side whose own request
+  ;; turned ready (we_started) moves the flow into SAS.  Both sides
+  ;; starting hands the flow two m.key.verification.start events and
+  ;; the SDK resolves the collision by a lexicographic coin flip —
+  ;; live-tested once as a duplicated "waiting for keys" and an
+  ;; m.timeout end on both devices.
+  (let ((started nil))
+    (cl-letf (((symbol-function 'elneo-verification-start-sas)
+               (lambda (profile flow-id)
+                 (setq started (list profile flow-id)))))
+      (elneo-verify--on-update
+       (list :profile "mxtest" :flow-id "f3" :user-id "@a:hs"
+             :we-started t :state "ready"))
+      (mx-check "ready: our own request starts the SAS flow"
+                started '("mxtest" "f3"))
+      (setq started 'untouched)
+      (elneo-verify--on-update
+       (list :profile "mxtest" :flow-id "f4" :user-id "@a:hs"
+             :we-started nil :state "ready"))
+      (mx-check "ready: the responder waits instead of starting"
+                started 'untouched)))
+  (when (buffer-live-p (gethash "mxtest" elneo-verify--buffers))
+    (kill-buffer (gethash "mxtest" elneo-verify--buffers)))
+  (remhash "mxtest" elneo-verify--buffers)
+
   (message "results: %d passed, %d failed" pass fail)
   (kill-emacs (if (zerop fail) 0 1)))

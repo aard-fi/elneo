@@ -211,6 +211,17 @@ async fn watch_request(daemon: SharedDaemon, request: VerificationRequest) {
 /// FLOW_ID comes from the owning request (the SAS type itself has no
 /// flow-id accessor).
 async fn watch_sas(daemon: SharedDaemon, sas: SasVerification, flow_id: String) {
+    // A SAS the peer started waits for our `m.key.verification.accept`
+    // before either side sends its key — the SDK only hands us the
+    // accept through an explicit call, so a flow that starts on the
+    // other side deadlocked here: both devices sat "waiting for keys"
+    // until the request's 10-minute timer cancelled with `m.timeout`.
+    // Accepting is a no-op for a SAS we started ourselves: only the
+    // peer-started state produces the event, and once accepted the
+    // call is idempotent.
+    if let Err(e) = sas.accept().await {
+        warn!("SAS accept failed: {e:#}");
+    }
     let stream = sas.changes();
     pin_mut!(stream);
     // The same SAS state can surface more than once: SasState::Confirmed
@@ -674,10 +685,17 @@ pub(crate) async fn auto_crypto_onboarding(daemon: &SharedDaemon, client: &Clien
     let Some(user_id) = client.user_id().map(|u| u.to_owned()) else {
         return;
     };
-    // Server-authoritative: the check doubles as the SDK's initial key
-    // query, so an existing account's identity shows up before this
-    // session's first sync.
-    let identity = match encryption.get_user_identity(&user_id).await {
+    // Server-authoritative: `get_user_identity' reads the crypto store
+    // only — on a fresh session (new data dir, forgotten profile) the
+    // store is empty, so an account that is cross-signed on the
+    // homeserver answers `None' and the daemon would wrongly take the
+    // fresh-account bootstrap branch (with secret storage already on
+    // the server, a silent no-op that never asks the user anything).
+    // `request_user_identity' performs and awaits the initial key
+    // query instead — the same thing `bootstrap_cross_signing_if_needed'
+    // does inside its own guard — so the branch is decided on
+    // homeserver truth.
+    let identity = match client.encryption().request_user_identity(&user_id).await {
         Ok(identity) => identity,
         Err(e) => {
             warn!("Could not query the account's cross-signing identity: {e:#}");

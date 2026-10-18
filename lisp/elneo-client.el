@@ -657,7 +657,10 @@ user their key."
 (defvar elneo-client--verification-nudged nil
   "Alist of (PROFILE . t) once the verification-needed prompt ran there.
 The daemon repeats its background crypto check at every activation;
-the guard makes one answer binding for the whole Emacs session.")
+the guard makes one answer binding for the whole Emacs session —
+but only until the profile's local state goes away: a logout or a
+forget clears the entry, so a re-login on the same profile name
+gets asked again.")
 
 (defun elneo-client--on-verification-needed (profile event)
   "Handle updateVerificationNeeded for PROFILE: prompt once.
@@ -1410,6 +1413,11 @@ recovery state go with them."
                (remhash flow elneo-verifications)))
            elneo-verifications)
   (remhash profile elneo-recovery-states)
+  ;; The nudge guard too: a fresh login on the same profile name must
+  ;; be able to ask again (defvar docstring).
+  (setq elneo-client--verification-nudged
+        (assoc-delete-all profile elneo-client--verification-nudged
+                          #'equal))
   ;; elneo-verify.el is an autoloaded UI layer; when it has not been
   ;; loaded yet, its buffer table is unbound and `gethash' would
   ;; signal (see the room-buffers block above).
