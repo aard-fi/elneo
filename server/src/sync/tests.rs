@@ -1976,3 +1976,49 @@ fn merge_space_parents_keeps_their_place() {
         ]
     );
 }
+
+#[test]
+fn image_filter_keeps_pictures_and_stickers() {
+    // One canned photo-walk page: a text message among two picture
+    // kinds.  The filter's retain keeps m.image and the m.sticker
+    // entries that ride the same media shape; everything else a
+    // text-page caller expects to keep goes here instead.
+    fn msg_entry(msgtype: &str) -> MessageEntry {
+        MessageEntry {
+            event_id: "$e:hs".into(),
+            sender: "@a:hs".into(),
+            sender_name: None,
+            sender_avatar: None,
+            sender_trust: None,
+            body: "pic.png".into(),
+            formatted_body: None,
+            ts: 1737043200000,
+            msgtype: msgtype.to_owned(),
+            is_own: false,
+            media: None,
+            reply_to: None,
+            thread_root: None,
+            edited: None,
+            redacted: None,
+            mentions: None,
+            reactions: None,
+            geo: None,
+            poll: None,
+        }
+    }
+    // Oldest->newest, as `handle_get_room_messages' orders entries.
+    let page = vec![
+        msg_entry("m.text"),
+        msg_entry("m.image"),
+        msg_entry("m.sticker"),
+    ];
+    let kept: Vec<String> = page
+        .iter()
+        .filter(|e| image_filter_keeps(e))
+        .map(|e| e.msgtype.clone())
+        .collect();
+    assert_eq!(kept, vec!["m.image", "m.sticker"]);
+    // Sticker entries keep their msgtype on the wire (the Emacs seed
+    // dispatches through --picture-p, which reads it).
+    assert_eq!(page[2].msgtype, "m.sticker");
+}

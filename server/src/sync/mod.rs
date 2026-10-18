@@ -6238,6 +6238,15 @@ where
     }
 }
 
+/// The filtered photo walk's retained message entries (`filter:
+/// "image"` on getRoomMessages): the pictures the Emacs viewer
+/// browses.  m.image, plus m.sticker — a sticker carries the same
+/// MediaEntry, and one outside the room buffer's rendered window
+/// must be found by the walk like any other picture.
+fn image_filter_keeps(e: &MessageEntry) -> bool {
+    e.msgtype == "m.image" || e.msgtype == "m.sticker"
+}
+
 pub async fn handle_get_room_messages(
     daemon: SharedDaemon,
     req: Option<u64>,
@@ -6250,11 +6259,14 @@ pub async fn handle_get_room_messages(
         return;
     };
 
-    // Photo-browser pages ask for m.image only.  The wire event filter
+    // Photo-browser pages keep pictures.  The wire event filter
     // has no msgtype notion (and encrypted rooms ship every message as
     // m.room.encrypted), so narrow the server-side scan to the two
-    // message-bearing types and keep the decrypted m.image entries
-    // below.  An unknown filter string is an error, not silently
+    // message-bearing types and keep the picture entries that
+    // `image_filter_keeps' names (m.image, plus m.sticker — a sticker
+    // is a picture riding the same media shape, and one beyond the
+    // room buffer's rendered window must be walkable too).  An
+    // unknown filter string is an error, not silently
     // everything: a typo'd value returning the unfiltered page would
     // hand the caller a pagination token from a different walk.
     let image_filter = match filter.as_deref() {
@@ -6306,7 +6318,7 @@ pub async fn handle_get_room_messages(
     // Backward pagination returns newest-first; Emacs wants oldest->newest.
     let mut entries = messages_to_entries(&messages.chunk, &room, Some(&daemon)).await;
     if image_filter {
-        entries.retain(|e| e.msgtype == "m.image");
+        entries.retain(image_filter_keeps);
     }
     entries.reverse();
     info!(
