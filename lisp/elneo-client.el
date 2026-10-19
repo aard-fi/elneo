@@ -139,29 +139,42 @@ eyebrowse perspective is not visible.)"
     rooms))
 
 (defun elneo--room-pick-label (room)
-  "The room-pick candidate string for ROOM: \"PROFILE: NAME\"."
-  (format "%s: %s"
-          (plist-get room :profile)
-          (or (plist-get room :display-name)
-              (plist-get room :room-id))))
+  "The room-pick candidate string for ROOM: \"PROFILE: NAME\",
+with \" [replaced]\" appended for a tombstoned room."
+  (concat
+   (format "%s: %s"
+           (plist-get room :profile)
+           (or (plist-get room :display-name)
+               (plist-get room :room-id)))
+   (and (plist-get room :upgraded-to) " [replaced]")))
 
 (defun elneo-completing-read-room (&optional profile)
   "Read a room with completing-read, return its room record plist.
 Without PROFILE the pick covers every registered account's rooms;
 with PROFILE (an account name) only that account's rooms are
 offered — `elneo-room-forward-cross-account' restricts its pick
-this way.  Rooms sharing profile and display name (an
-upgraded-away twin) would render one candidate — each colliding
-room gets its id appended, so both stay visible and pickable.
-Signals `user-error' on no choice or no room at all."
-  (let* ((rooms (if profile
-                    (let (mine)
-                      (maphash (lambda (_key room)
-                                 (when (equal (plist-get room :profile) profile)
-                                   (push room mine)))
-                               elneo--rooms)
-                      (nreverse mine))
-                  (elneo-rooms-all)))
+this way.  Rooms replaced by an upgrade are marked \" [replaced]\"
+and offered last: they are openable for history, but sends there
+die on the server.
+Rooms still sharing a label (two live same-name rooms) each get
+their id appended, so both stay visible and pickable.  Signals
+`user-error' on no choice or no room at all."
+  (let* ((rooms
+          ;; Live rooms first: a tombstoned twin must not be the
+          ;; candidate at hand.
+          (let (live dead)
+            (dolist (room (if profile
+                              (let (mine)
+                                (maphash (lambda (_key room)
+                                           (when (equal (plist-get room :profile)
+                                                        profile)
+                                             (push room mine)))
+                                         elneo--rooms)
+                                (nreverse mine))
+                            (elneo-rooms-all)))
+              (if (plist-get room :upgraded-to)
+                  (push room dead) (push room live)))
+            (nconc (nreverse live) (nreverse dead))))
          (counts
           (let ((table (make-hash-table :test 'equal)))
             (dolist (room rooms table)

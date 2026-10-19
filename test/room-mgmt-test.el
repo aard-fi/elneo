@@ -922,11 +922,11 @@ The same binding shape the `C-c ?' help window gives the render."
                          t)
                     t)))))
 
-  ;; Same profile and display name: the label collision case — an
-  ;; upgraded-away twin renders identically to its successor.  Both
-  ;; must appear (with their ids) and each must resolve to its own
-  ;; room; before the disambiguation assoc returned whichever room
-  ;; hash order put first, and completion showed one candidate.
+  ;; Same profile and display name: an upgraded-away twin renders like
+  ;; its successor.  The twin is marked " [replaced]" and offered
+  ;; last, the successor keeps the plain label; before the fix assoc
+  ;; returned whichever room hash order put first, and completion
+  ;; showed one candidate.
   (let ((elneo--rooms (make-hash-table :test 'equal)))
     (puthash (cons "p1" "!dead")
              (list :profile "p1" :room-id "!dead" :display-name "Ops"
@@ -938,24 +938,45 @@ The same binding shape the `C-c ?' help window gives the render."
     (let (offered)
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (_p coll &rest _)
-                   (setq offered (sort (copy-sequence coll) #'string<))
+                   (setq offered (copy-sequence coll))
                    (car coll))))
-        ;; Each colliding room its own id-tagged label.
         (elneo-completing-read-room "p1")
-        (mx-check "pick: both twins are offered, id-tagged"
+        (mx-check "pick: the twin is marked and offered last"
                   offered
-                  '("p1: Ops [!dead]" "p1: Ops [!live]"))
+                  '("p1: Ops" "p1: Ops [replaced]"))
         (setq offered nil)
         (cl-letf (((symbol-function 'completing-read)
-                   (lambda (_p coll &rest _) (car (member "p1: Ops [!live]" coll)))))
+                   (lambda (_p coll &rest _) (car (member "p1: Ops" coll)))))
           (let ((chosen (elneo-completing-read-room "p1")))
-            (mx-check "pick: the id-tagged label resolves to its own room"
+            (mx-check "pick: the plain label resolves to the successor"
                       (plist-get chosen :room-id) "!live")))
         (cl-letf (((symbol-function 'completing-read)
-                   (lambda (_p coll &rest _) (car (member "p1: Ops [!dead]" coll)))))
+                   (lambda (_p coll &rest _)
+                     (car (member "p1: Ops [replaced]" coll)))))
           (let ((chosen (elneo-completing-read-room "p1")))
-            (mx-check "pick: the dead twin resolves to itself too"
+            (mx-check "pick: the marked twin resolves to itself"
                       (plist-get chosen :room-id) "!dead"))))))
+
+  ;; A genuine collision — two live same-name rooms — still needs the
+  ;; id fallback: the marker only speaks for upgraded rooms.
+  (let ((elneo--rooms (make-hash-table :test 'equal)))
+    (puthash (cons "p1" "!a")
+             (list :profile "p1" :room-id "!a" :display-name "Twin")
+             elneo--rooms)
+    (puthash (cons "p1" "!b")
+             (list :profile "p1" :room-id "!b" :display-name "Twin")
+             elneo--rooms)
+    (let (offered)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_p coll &rest _)
+                   (setq offered (sort (copy-sequence coll) #'string<))
+                   (car (member "p1: Twin [!b]" coll)))))
+        (let ((chosen (elneo-completing-read-room "p1")))
+          (mx-check "pick: two live same-name rooms get id-tagged labels"
+                    offered
+                    '("p1: Twin [!a]" "p1: Twin [!b]"))
+          (mx-check "pick: an id-tagged label resolves to its own room"
+                    (plist-get chosen :room-id) "!b")))))
 
   ;; The `f' key shares the keymap with the draft: a direct bind broke
   ;; typing f there.  The defkey wrapper must self-insert in the draft
