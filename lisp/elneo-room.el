@@ -3140,9 +3140,11 @@ Emacs restart."
 (defun elneo-room--input-send (&optional scale)
   "Send the draft and clear the input area.
 With a SCALE spec (from the RET prefix argument), it applies to
-every image upload the draft dispatches.  Empty (whitespace-only)
-drafts are ignored.  The text leaves the buffer only after every
-segment was handed to the daemon — a signal from a dead daemon
+every image upload the draft dispatches.  Without one, an image
+over `elneo-image-oversize-limit' is asked about first
+\(`elneo--scale-oversize-answer').  Empty (whitespace-only) drafts are ignored.
+The text leaves the buffer only after every segment was handed to
+the daemon — a signal from a dead daemon
 (`elneo-server--send') must not eat the draft, so sending happens
 before the deletion.  A partial failure (one segment sent, a later
 one signals) leaves the whole draft in place; the user edits out
@@ -3160,8 +3162,14 @@ what already went."
                       (buffer-substring (elneo-room--input-beg-pos)
                                         (point-max))
                     text)))
-        (when (and current-prefix-arg (null scale))
-          (setq scale (elneo-room--scale-answer body)))
+        (if (and current-prefix-arg (null scale))
+            ;; C-u decided — an emptied prompt must not be re-asked
+            ;; by the size gate.
+            (setq scale (elneo-room--scale-answer body))
+          (unless scale
+            (setq scale (elneo--scale-oversize-answer
+                         (mapcar #'expand-file-name
+                                 (elneo-room--tag-paths body))))))
         (elneo-room--dispatch-input body scale))
       (let ((inhibit-read-only t))
         (delete-region (elneo-room--input-beg-pos) (point-max)))
@@ -3218,28 +3226,32 @@ Before the draft deletion: the composition survives the failed RET."
 message not sent, draft kept"
                     state)))))
 
-(defun elneo-room--scale-answer (text)
-  "The scale spec the uploads in TEXT get, or nil.
-Walks the same tag regex the dispatch uses and prompts once — and
-only when a tag's path is an image by extension: a C-u over a
-text-only draft, or over a `[file:` of something else, sends
-unchanged.  An invalid answer is a `user-error': the prefix asked
-for scaling, a typo must not quietly send originals."
-  (let ((pos 0) hit)
-    (while (and (not hit)
-                (string-match "\\[\\(?:image\\|file\\): \\([^]\n]+\\)]" text pos))
-      (when (elneo--image-file-p
-             (string-trim (substring-no-properties (match-string 1 text))))
-        (setq hit t))
+(defconst elneo-room--tag-regexp "\\[\\(?:image\\|file\\): \\([^]\n]+\\)]"
+  "The [image:]/[file: tag shape the dispatch and the gates walk.")
+
+(defun elneo-room--tag-paths (text)
+  "The trimmed, property-stripped paths of every attach tag in TEXT, in order."
+  (let ((pos 0) paths)
+    (while (string-match elneo-room--tag-regexp text pos)
+      (push (string-trim (substring-no-properties
+                          (match-string 1 text)))
+            paths)
       (setq pos (match-end 0)))
-    (when hit (elneo--scale-read))))
+    (nreverse paths)))
+
+(defun elneo-room--scale-answer (text)
+  "The scale spec the C-u prefix asks for over TEXT, nil without images.
+Prompts only when some tag path is an image by extension; an invalid
+answer is a `user-error' — a typo must not quietly send originals."
+  (when (cl-some #'elneo--image-file-p (elneo-room--tag-paths text))
+    (elneo--scale-read)))
 
 (defun elneo-room--dispatch-input (text &optional scale)
   "Send TEXT: [image: PATH] and [file: PATH] tags as uploads, text
 as text.  SCALE applies to image-tag uploads (a `[file:` of an
 image scales too, same as the dired flow)."
   (let ((pos 0))
-    (while (string-match "\\[\\(?:image\\|file\\): \\([^]\n]+\\)]" text pos)
+    (while (string-match elneo-room--tag-regexp text pos)
       (let ((before (substring text pos (match-beginning 0)))
             (tag (match-string 0 text))
             (path (string-trim
@@ -7281,17 +7293,13 @@ it is a playable video, not an ordinary picture."
   (let* ((size (alist-get 'size media))
          (duration (alist-get 'duration media))
          (parts (append
-                 (when size (list (elneo-room--size-string size)))
+                 (when size (list (elneo--size-string size)))
                  (when duration (list (elneo-room--duration-string duration))))))
     (if parts (format " (%s)" (string-join parts ", ")) "")))
 
-(defun elneo-room--size-string (bytes)
-  "BYTES as a human-readable size."
-  (cond
-   ((>= bytes 1073741824) (format "%.1f GiB" (/ bytes 1073741824.0)))
-   ((>= bytes 1048576) (format "%.1f MiB" (/ bytes 1048576.0)))
-   ((>= bytes 1024) (format "%.1f KiB" (/ bytes 1024.0)))
-   (t (format "%d B" bytes))))
+;; elneo--size-string lives in elneo-client (the lower layer, where
+;; the size gate runs); the old name stays as an alias.
+(defalias 'elneo-room--size-string #'elneo--size-string)
 
 (defun elneo-room--duration-string (ms)
   "MS (milliseconds) as M:SS."

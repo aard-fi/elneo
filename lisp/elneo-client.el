@@ -1731,6 +1731,29 @@ through `elneo-poll-update-hook'."
 ;; convert (6), gm convert (GraphicsMagick), sips (macOS).  Scaling is
 ;; an optimization: it never refuses a send, the worst case is the
 ;; original going out with a message.
+;;
+;; The size gate below is a second entry into the same scaler, on
+;; size.  It runs at the caller level (draft RET, dired), never in
+;; the async upload plumbing, which must not prompt.
+
+(defcustom elneo-image-oversize-limit 1048576   ; 1 MiB
+  "Byte size an outgoing image may not exceed without a second look.
+0 disables.  Costs one `file-attributes' stat per image — on Tramp,
+a remote round trip.  A client-side courtesy, not the daemon's
+20 MiB upload limit; scaling stays best-effort."
+  :type 'natnum
+  :group 'elneo)
+
+(defcustom elneo-image-oversize-action 'ask
+  "What sending an image over `elneo-image-oversize-limit' does.
+`ask' (the default) asks; a no opens the scale prompt, whose empty
+answer means the original after all (C-u semantics).  `scale' opens
+the prompt directly; `send' never asks.  The spec sticks to every
+image of the send, like a C-u spec."
+  :type '(choice (const :tag "Ask; no offers scaling" ask)
+                 (const :tag "Ask for a scale spec" scale)
+                 (const :tag "Send without asking" send))
+  :group 'elneo)
 
 (defvar elneo--scale-last nil
   "Raw last answer typed at the C-u image-scale prompt.
@@ -1808,6 +1831,57 @@ imageless batch would have nothing to stick to."
     (while (and files (not (setq hit (elneo--image-file-p (car files)))))
       (setq files (cdr files)))
     (when hit (elneo--scale-read))))
+
+(defun elneo--size-string (bytes)
+  "BYTES as a human-readable size."
+  (cond ((>= bytes 1073741824) (format "%.1f GiB" (/ bytes 1073741824.0)))
+        ((>= bytes 1048576)    (format "%.1f MiB" (/ bytes 1048576.0)))
+        ((>= bytes 1024)       (format "%.1f KiB" (/ bytes 1024.0)))
+        (t (format "%d B" bytes))))
+
+(defun elneo--scale-oversize-files (files)
+  "The oversize images among FILES, each as (PATH . SIZE), in order.
+Limit 0 answers nil; unstatable files are skipped — the upload path
+reports a missing file itself."
+  (let ((limit elneo-image-oversize-limit)
+        (oversize nil))
+    (when (> limit 0)
+      (dolist (file files)
+        (when (elneo--image-file-p file)
+          (let ((size (file-attribute-size (file-attributes file))))
+            (when (and size (> size limit))
+              (push (cons file size) oversize))))))
+    (nreverse oversize)))
+
+(defun elneo--scale-oversize-answer (files)
+  "The scale spec for the oversize images among FILES, or nil —
+nothing oversize, limit 0, action `send', or the user stood by
+the originals.  One prompt per send, like
+`elneo--scale-when-images'; the spec sticks to every image."
+  (when-let* ((oversize (elneo--scale-oversize-files files)))
+    (let ((limit (elneo--size-string elneo-image-oversize-limit)))
+      (cond
+       ((eq elneo-image-oversize-action 'send) nil)
+       ((eq elneo-image-oversize-action 'scale)
+        (if (cdr oversize)
+            (message "Matrix: %d images over %s — the scale prompt follows"
+                     (length oversize) limit)
+          (message "Matrix: %s is %s — over the %s image limit"
+                   (file-name-nondirectory (caar oversize))
+                   (elneo--size-string (cdar oversize)) limit))
+        (elneo--scale-read))
+       (t
+        (let ((largest (apply #'max (mapcar #'cdr oversize))))
+          (if (y-or-n-p
+               (if (cdr oversize)
+                   (format "%d images over the limit, largest %s — \
+send them all anyway? "
+                           (length oversize) (elneo--size-string largest))
+                 (format "%s is %s — send it anyway? "
+                         (file-name-nondirectory (caar oversize))
+                         (elneo--size-string (cdar oversize)))))
+              nil
+            (elneo--scale-read))))))))
 
 (defun elneo--scale-backend ()
   "The resize backend present here, or nil.

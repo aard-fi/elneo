@@ -131,8 +131,10 @@ directories, and pick the room with `elneo-dired--target-room'.
 A prefix argument asks once for an image scale (a longest-edge
 size like 1920 or a percentage like 50%) applied to every image
 in the batch; empty input at the prompt sends the originals.
-Non-interactively, FILES is the list, ROOM the room record and
-SCALE the spec (or nil — see `elneo-room-image')."
+Without one, an image over `elneo-image-oversize-limit' is asked
+about first.  Non-interactively, FILES is the list, ROOM
+the room record and SCALE the spec (or nil — see
+`elneo-room-image')."
   (interactive
    (let ((files (elneo-dired--attachable-files (dired-get-marked-files))))
      (list files nil
@@ -143,6 +145,10 @@ SCALE the spec (or nil — see `elneo-room-image')."
   (setq files (elneo-dired--attachable-files files))
   (unless files
     (user-error "No attachable files (marked or at point)"))
+  ;; The size gate before the room pick, same rationale as the C-u
+  ;; prompt above; a C-u that emptied it already said "originals".
+  (unless (or scale current-prefix-arg)
+    (setq scale (elneo--scale-oversize-answer files)))
   (let* ((room (or room (elneo-dired--target-room)))
          (profile (plist-get room :profile))
          (room-id (plist-get room :room-id))

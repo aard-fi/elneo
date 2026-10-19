@@ -6,8 +6,11 @@
 ;; and is an optimization: every degenerate case — no tool, unknown
 ;; size, vector svg, animated gif under sips, any failure — falls back
 ;; to the untouched original with a message, never loses the send.
-;; No test requires an external tool to exist: every tool call goes
-;; through stubs, and the temp-file mechanics run for real.
+;; The size gate reuses the same prompt: an over-limit image is
+;; asked about on RET or a dired send; a C-u — even emptied — is
+;; never second-guessed.  No test requires an external tool to exist: every
+;; tool call goes through stubs, and the temp-file mechanics run for
+;; real.
 ;;
 ;; Run: emacs -Q --batch -L lisp -l test/scale-test.el
 
@@ -94,6 +97,126 @@
                 (list (elneo--scale-when-images '())
                       prompts)
                 (list nil 1))))
+
+  ;; ---- The size gate helpers.  file-attributes is stubbed (the
+  ;; reader is `file-attribute-size', nth 7 of the attribute list);
+  ;; y-or-n-p and read-string count prompts, and must never fire in
+  ;; the silent cases.
+  ;; The limit is pinned in every gate section: the tests probe the
+  ;; gate logic, not the shipped defcustom default.
+  (let ((big 10485760)                  ; 10 MiB, over the pinned limit
+        (elneo-image-oversize-limit 5242880)
+        (yns 0) (reads 0))
+    (cl-letf (((symbol-function 'file-attributes)
+               (lambda (path &rest _)
+                 (let ((size (cdr (assoc path
+                                         `(("/d/big.png" . ,big)
+                                           ("/d/big2.png" . 8388608)
+                                           ("/d/small.png" . 102400)
+                                           ("/d/a.txt" . ,big))))))
+                   (when size
+                     (let ((attrs (make-list 11 nil)))
+                       (setf (nth 7 attrs) size) attrs)))))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_q) (setq yns (1+ yns)) nil))
+              ((symbol-function 'read-string)
+               (lambda (&rest _) (setq reads (1+ reads)) "1920")))
+      (mx-check "oversize: under limit, non-image, unstatable → nil"
+                (elneo--scale-oversize-files
+                 '("/d/small.png" "/d/a.txt" "/d/gone.png"))
+                nil)
+      (mx-check "oversize: the over-limit image with its size"
+                (elneo--scale-oversize-files '("/d/big.png"))
+                (list (cons "/d/big.png" big)))
+      (mx-check "oversize: batch order kept"
+                (elneo--scale-oversize-files
+                 '("/d/small.png" "/d/big.png" "/d/big2.png"))
+                (list (cons "/d/big.png" big) (cons "/d/big2.png" 8388608)))
+      (setq yns 0 reads 0)
+      (mx-check "answer: under limit never prompts"
+                (list (elneo--scale-oversize-answer '("/d/small.png"))
+                      yns reads)
+                (list nil 0 0))
+      (setq yns 0 reads 0)
+      (mx-check "answer: ask+no offers the scale prompt"
+                (list (elneo--scale-oversize-answer '("/d/big.png")) yns reads)
+                (list '(px . 1920) 1 1))
+      (setq yns 0 reads 0)
+      (mx-check "answer: a batch asks once"
+                (list (elneo--scale-oversize-answer
+                       '("/d/big.png" "/d/big2.png"))
+                      yns reads)
+                (list '(px . 1920) 1 1))
+      (setq yns 0 reads 0)
+      (mx-check "answer: oversize non-image is not asked about"
+                (list (elneo--scale-oversize-answer '("/d/a.txt")) yns reads)
+                (list nil 0 0))))
+  ;; ask+yes sends the originals; an empty answer after a no means
+  ;; the original after all.
+  (let ((elneo-image-oversize-limit 5242880)
+        (yns 0) (reads 0))
+    (cl-letf (((symbol-function 'file-attributes)
+               (lambda (_path &rest _)
+                 (let ((attrs (make-list 11 nil)))
+                   (setf (nth 7 attrs) 10485760) attrs)))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_q) (setq yns (1+ yns)) t))
+              ((symbol-function 'read-string)
+               (lambda (&rest _) (setq reads (1+ reads)) "")))
+      (mx-check "answer: ask+yes sends the originals"
+                (list (elneo--scale-oversize-answer '("/d/big.png")) yns reads)
+                (list nil 1 0))
+      (setq yns 0 reads 0)
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (_q) (setq yns (1+ yns)) nil)))
+        (mx-check "answer: empty answer after a no means the original"
+                  (list (elneo--scale-oversize-answer '("/d/big.png"))
+                        yns reads)
+                  (list nil 1 1)))))
+  ;; 'scale and 'send, and limit 0: the silent paths; the reader
+  ;; stubs signal — they must never be called.
+  (let ((reads 0)
+        (elneo-image-oversize-limit 5242880))
+    (cl-letf (((symbol-function 'file-attributes)
+               (lambda (_path &rest _)
+                 (let ((attrs (make-list 11 nil)))
+                   (setf (nth 7 attrs) 10485760) attrs)))
+              ((symbol-function 'y-or-n-p)
+               (lambda (&rest _) (error "y-or-n-p must not be called")))
+              ((symbol-function 'read-string)
+               (lambda (&rest _) (setq reads (1+ reads)) "1920")))
+      (let ((elneo-image-oversize-action 'scale))
+        (mx-check "answer: action scale goes straight to the prompt"
+                  (list (elneo--scale-oversize-answer '("/d/big.png")) reads)
+                  (list '(px . 1920) 1)))
+      (setq reads 0)
+      (let ((elneo-image-oversize-action 'send))
+        (mx-check "answer: action send never asks"
+                  (list (mx-err (lambda ()
+                                  (elneo--scale-oversize-answer '("/d/big.png"))))
+                        reads)
+                  (list 'no-error 0)))
+      (let ((elneo-image-oversize-limit 0))
+        (mx-check "answer: limit 0 disables the gate"
+                  (list (mx-err (lambda ()
+                                  (elneo--scale-oversize-answer '("/d/big.png"))))
+                        reads)
+                  (list 'no-error 0)))))
+  ;; A quit at the question propagates — the caller keeps the draft.
+  (let ((elneo-image-oversize-limit 5242880))
+    (cl-letf (((symbol-function 'file-attributes)
+               (lambda (_path &rest _)
+                 (let ((attrs (make-list 11 nil)))
+                   (setf (nth 7 attrs) 10485760) attrs)))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_q) (signal 'quit nil))))
+      (mx-check "answer: quit at the question propagates"
+                (condition-case e
+                    (progn (elneo--scale-oversize-answer '("/d/big.png"))
+                           'no-quit)
+                  (quit 'quit-signal)
+                  (error 'other-error))
+                'quit-signal)))
 
   ;; ---- elneo--scale-backend: the probe order, uncached.
   (cl-letf (((symbol-function 'executable-find)
@@ -463,6 +586,132 @@
        nil)
       (mx-check "dired: no spec means no spec"
                 (equal (nreverse sent) (list (cons "/d/a.txt" nil))) t)))
+
+  ;; ---- The size gate on RET: over-limit image asked once, the
+  ;; answer rides like a C-u spec; a C-u — even emptied — is never
+  ;; re-asked; a quit keeps the draft.
+  (let* ((dir (make-temp-file "mx-scale" t))
+         (png (expand-file-name "photo.png" dir))
+         (elneo-image-oversize-limit 5242880)
+         buf yns reads
+         texts images)
+    (write-region "pixels" nil png)
+    (unwind-protect
+        (progn
+          (setq buf (generate-new-buffer " *oversize-draft*")
+                yns 0 reads 0)
+          (with-current-buffer buf
+            (elneo-room-mode)
+            (setq-local elneo-room--profile "mxtest")
+            (setq-local elneo-room--room-id "!room:hs")
+            (setq elneo-room--backfilled t))
+          (cl-letf (((symbol-function 'file-attributes)
+                     (lambda (path &rest _)
+                       (when (equal path png)
+                         ;; 10 MiB, over the pinned limit.
+                         (let ((attrs (make-list 11 nil)))
+                           (setf (nth 7 attrs) 10485760) attrs))))
+                    ((symbol-function 'y-or-n-p)
+                     (lambda (_q) (setq yns (1+ yns)) nil))
+                    ((symbol-function 'read-string)
+                     (lambda (&rest _) (setq reads (1+ reads)) "1920"))
+                    ((symbol-function 'elneo-room--send-text)
+                     (lambda (body) (push body texts)))
+                    ((symbol-function 'elneo-room-image)
+                     (lambda (_p _r path _cb _thread scale)
+                       (push (cons path scale) images))))
+            ;; Plain RET, answer "no": the image carries the spec.
+            (with-current-buffer buf
+              (elneo-room--reset-input-area (concat "[image: " png "]"))
+              (elneo-room--input-send)
+              (mx-check "gate RET: over-limit asks, no scales"
+                        (list (nreverse images) yns reads)
+                        (list (list (cons png '(px . 1920))) 1 1))
+              (setq texts nil images nil yns 0 reads 0)
+              ;; Plain RET, answer "yes": the original goes out.
+              (elneo-room--reset-input-area (concat "[image: " png "]"))
+              (cl-letf (((symbol-function 'y-or-n-p)
+                         (lambda (_q) (setq yns (1+ yns)) t)))
+                (elneo-room--input-send))
+              (mx-check "gate RET: yes sends the original"
+                        (list (nreverse images) yns reads)
+                        (list (list (cons png nil)) 1 0))
+              (setq texts nil images nil yns 0 reads 0)
+              ;; C-u with a real answer: the gate stays silent.
+              (elneo-room--reset-input-area (concat "[image: " png "]"))
+              (let ((current-prefix-arg '(4)))
+                (elneo-room--input-send))
+              (mx-check "gate RET: C-u spec is never second-guessed"
+                        (list (nreverse images) yns reads)
+                        (list (list (cons png '(px . 1920))) 0 1))
+              (setq texts nil images nil yns 0 reads 0)
+              ;; C-u emptied — "original after all" — never re-asked.
+              (elneo-room--reset-input-area (concat "[image: " png "]"))
+              (cl-letf (((symbol-function 'read-string)
+                         (lambda (&rest _) (setq reads (1+ reads)) "")))
+                (let ((current-prefix-arg '(4)))
+                  (elneo-room--input-send)))
+              (mx-check "gate RET: C-u emptied prompt means original, unasked"
+                        (list (nreverse images) yns reads)
+                        (list (list (cons png nil)) 0 1))
+              (setq texts nil images nil yns 0 reads 0)
+              ;; A quit at the question keeps the draft.
+              (elneo-room--reset-input-area (concat "[image: " png "]"))
+              (cl-letf (((symbol-function 'y-or-n-p)
+                         (lambda (_q) (signal 'quit nil))))
+                (let ((quitted
+                       (condition-case nil
+                           (progn (elneo-room--input-send) 'no-quit)
+                         (quit 'quit))))
+                  (mx-check "gate RET: quit keeps the draft"
+                            (list quitted
+                                  (and (string-search
+                                        (file-name-nondirectory png)
+                                        (elneo-room--draft-text))
+                                       t))
+                            (list 'quit t)))))))
+      (and buf (buffer-live-p buf) (kill-buffer buf))
+      (delete-directory dir t)))
+
+  ;; ---- The size gate on dired sends: one prompt per batch, before
+  ;; the room pick; a C-u that emptied it already decided.
+  (let ((sent nil) (yns 0) (reads 0)
+        (elneo-image-oversize-limit 5242880))
+    (cl-letf (((symbol-function 'elneo-room-file)
+               (lambda (_p _r path _cb _t scale)
+                 (push (cons path scale) sent)))
+              ((symbol-function 'file-attributes)
+               (lambda (path &rest _)
+                 (when (string-match "\\`/d/big" path)
+                   (let ((attrs (make-list 11 nil)))
+                     (setf (nth 7 attrs) 10485760) attrs))))
+              ((symbol-function 'y-or-n-p)
+               (lambda (_q) (setq yns (1+ yns)) nil))
+              ((symbol-function 'read-string)
+               (lambda (&rest _) (setq reads (1+ reads)) "1920")))
+      (elneo-dired-send-files
+       (list "/d/big.png") '(:profile "mxtest" :room-id "!room"
+                              :display-name "R") nil)
+      (mx-check "dired gate: over-limit asked, spec rides"
+                (list (nreverse sent) yns reads)
+                (list (list (cons "/d/big.png" '(px . 1920))) 1 1))
+      (setq sent nil yns 0 reads 0)
+      (elneo-dired-send-files
+       (list "/d/big.png" "/d/big2.png")
+       '(:profile "mxtest" :room-id "!room" :display-name "R") nil)
+      (mx-check "dired gate: batch asked once"
+                (list (length sent) yns reads)
+                (list 2 1 1))
+      (setq sent nil yns 0 reads 0)
+      ;; A C-u that emptied the prompt passes nil SCALE with the
+      ;; prefix still bound — no re-ask.
+      (let ((current-prefix-arg '(4)))
+        (elneo-dired-send-files
+         (list "/d/big.png") '(:profile "mxtest" :room-id "!room"
+                                :display-name "R") nil))
+      (mx-check "dired gate: C-u (even emptied) is never re-asked"
+                (list (nreverse sent) yns)
+                (list (list (cons "/d/big.png" nil)) 0))))
 
   (message "scale-test: %d passed, %d failed" pass fail)
   (kill-emacs (if (= fail 0) 0 1)))
