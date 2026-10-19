@@ -1290,7 +1290,8 @@ characters."
   "Log in a new Matrix account as PROFILE at HOMESERVER.
 If the daemon already has a persisted session for PROFILE, it is
 reused and no credentials are asked for.  The profile is remembered
-for future `elneo-start' sessions."
+for future `elneo-start' sessions.  A fresh login with no PASSWORD
+asks for it."
   (interactive
    (let ((profile (read-string "Profile name: " elneo-default-profile)))
      (elneo-client--check-profile-name profile)
@@ -1309,10 +1310,14 @@ download offer" profile))
      ;; restore it instead of asking for credentials again.
      (if (elneo--session-exists-p profile)
          (list profile)
+       ;; No password here.  `call-interactively' records the values
+       ;; this form returns in `command-history', in clear text, and
+       ;; `savehist-mode' writes that list to disk.  The body asks
+       ;; for the password instead: a prompt there is not recorded
+       ;; (see the Elisp manual, node "Command History").
        (list profile
              (read-string "Homeserver: " "https://matrix.org")
-             (read-string "Username: ")
-             (read-passwd "Password: ")))))
+             (read-string "Username: ")))))
   (elneo-client--check-profile-name profile)
   (elneo--accounts-load)
   (if (null homeserver)
@@ -1322,6 +1327,8 @@ download offer" profile))
         (elneo--debug-log "Matrix [%s] reusing persisted session" profile)
         (elneo-client--activate profile))
     ;; Fresh login.
+    (unless password
+      (setq password (read-passwd "Password: ")))
     (elneo--account-register profile homeserver)
     (unless (elneo-server-live-p profile)
       (elneo-server-start profile))
