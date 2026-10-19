@@ -121,7 +121,14 @@ use serde::{Deserialize, Serialize};
 ///    returning silently — Emacs offers the verify/recovery flows once per
 ///    profile per session.  Old daemons never emit it and old clients ignore
 ///    it, so the activation minimum stays put.
-pub const PROTOCOL_VERSION: u32 = 23;
+/// 24: the `sendImage`/`sendFile` commands gain optional `mime` and `info`:
+///    a `mime` overrides the filename guess (content type and msgtype
+///    follow it), and `info` re-sends the source event's media metadata
+///    (`width`/`height` in pixels, `duration` in ms, `size` in bytes — see
+///    [`SendInfo`]).  A forward uses both so the re-send stays the media
+///    kind it was; without them the daemon falls back to the old name
+///    guess, so old clients keep working.
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// serde `skip_serializing_if` helper: false-valued createRoom flags
 /// (public, is_direct) stay off the wire — deserialization defaults
@@ -133,6 +140,24 @@ fn is_false(v: &bool) -> bool {
 /// Human-facing release version of the daemon binary (informational only;
 /// code checks [`PROTOCOL_VERSION`]).
 pub const RELEASE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Media metadata a re-send carries over from the source event's
+/// info: `width`/`height` in pixels, `duration` in milliseconds,
+/// `size` in bytes.  The daemon routes the present values into the
+/// ruma info struct matching the attachment's content type, so a
+/// forwarded image arrives with its dimensions and a forwarded video
+/// with its duration as before.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SendInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "@type")]
@@ -547,9 +572,21 @@ pub enum Command {
         /// (MSC3440) instead of the room timeline.
         #[serde(default)]
         thread_root: Option<String>,
+        /// When set, the content type the attachment is sent as,
+        /// overriding the filename guess — a re-send that carries its
+        /// source's mimetype; the msgtype and `info.mimetype'
+        /// follow it.
+        #[serde(default)]
+        mime: Option<String>,
+        /// When set, the source event's media metadata to re-send
+        /// (`width`/`height`/`duration`/`size`, see [`SendInfo`]).
+        #[serde(default)]
+        info: Option<SendInfo>,
     },
-    /// Send any file as an attachment; the message type follows the
-    /// content type the daemon guesses from the file name.
+    /// Send any file as an attachment; an optional `mime` names the
+    /// content type (overriding the filename guess — a re-send that
+    /// knows its source), otherwise the daemon guesses from the file
+    /// name and everything else as before.
     #[serde(rename = "sendFile")]
     SendFile {
         room_id: String,
@@ -559,6 +596,16 @@ pub enum Command {
         /// (MSC3440) instead of the room timeline.
         #[serde(default)]
         thread_root: Option<String>,
+        /// When set, the content type the attachment is sent as,
+        /// overriding the filename guess — a re-send that carries its
+        /// source's mimetype; the msgtype and `info.mimetype'
+        /// follow it.
+        #[serde(default)]
+        mime: Option<String>,
+        /// When set, the source event's media metadata to re-send
+        /// (`width`/`height`/`duration`/`size`, see [`SendInfo`]).
+        #[serde(default)]
+        info: Option<SendInfo>,
     },
     /// Fetch a history page: the `limit` newest messages ending at the
     /// token `from` (None = the most recent end), with a
@@ -1854,27 +1901,52 @@ mod tests {
                     room_id: "!r:hs".into(),
                     path: "/tmp/p.png".into(),
                     thread_root: None,
+                    mime: None,
+                    info: None,
                 },
                 json!({"@type": "sendImage", "room_id": "!r:hs", "path": "/tmp/p.png",
-                       "thread_root": null}),
+                       "thread_root": null, "mime": null, "info": null}),
             ),
             (
                 Command::SendImage {
                     room_id: "!r:hs".into(),
                     path: "/tmp/p.png".into(),
                     thread_root: Some("$root:hs".into()),
+                    mime: None,
+                    info: None,
                 },
                 json!({"@type": "sendImage", "room_id": "!r:hs", "path": "/tmp/p.png",
-                       "thread_root": "$root:hs"}),
+                       "thread_root": "$root:hs", "mime": null, "info": null}),
             ),
             (
                 Command::SendFile {
                     room_id: "!r:hs".into(),
                     path: "/tmp/doc.pdf".into(),
                     thread_root: None,
+                    mime: None,
+                    info: None,
                 },
                 json!({"@type": "sendFile", "room_id": "!r:hs", "path": "/tmp/doc.pdf",
-                       "thread_root": null}),
+                       "thread_root": null, "mime": null, "info": null}),
+            ),
+            (
+                // The forward's shape: name the content type and
+                // carry the source event's info along.
+                Command::SendFile {
+                    room_id: "!r:hs".into(),
+                    path: "/tmp/forwarded.jpg".into(),
+                    thread_root: None,
+                    mime: Some("image/jpeg".into()),
+                    info: Some(SendInfo {
+                        width: Some(1920),
+                        height: Some(1080),
+                        duration: None,
+                        size: Some(123456),
+                    }),
+                },
+                json!({"@type": "sendFile", "room_id": "!r:hs", "path": "/tmp/forwarded.jpg",
+                       "thread_root": null, "mime": "image/jpeg",
+                       "info": {"width": 1920, "height": 1080, "size": 123456}}),
             ),
             (
                 Command::PollCreate {
@@ -3006,7 +3078,7 @@ mod tests {
                     release: RELEASE_VERSION.into(),
                 },
                 json!({
-                    "@type": "daemonInfo", "protocol": 23,
+                    "@type": "daemonInfo", "protocol": 24,
                     "release": env!("CARGO_PKG_VERSION")
                 }),
             ),

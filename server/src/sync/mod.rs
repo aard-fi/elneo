@@ -58,7 +58,7 @@ use matrix_sdk::{
     room::{IncludeRelations, MessagesOptions, RelationsOptions},
     ruma::{
         api::client::filter::RoomEventFilter, api::Direction, serde::Raw, OwnedRoomId, OwnedUserId,
-        RoomId, UserId,
+        RoomId, UInt, UserId,
     },
     Client, LoopCtrl, Room, RoomMemberships, RoomState,
 };
@@ -67,7 +67,7 @@ use tracing::{debug, info, warn};
 use crate::daemon::SharedDaemon;
 use crate::protocol::{
     Event, HierarchyRoom, MediaEntry, MemberEntry, Mentions, MessageEntry, OutEvent, PollEntry,
-    PollOption, ReactionEntry, ReceiptEntry, RoomSummary,
+    PollOption, ReactionEntry, ReceiptEntry, RoomSummary, SendInfo,
 };
 
 /// Aggregated reaction state: target event id -> key -> reaction event id ->
@@ -6087,10 +6087,69 @@ pub async fn handle_poll_end(
 /// Largest file we accept for upload, in bytes.
 const MAX_UPLOAD_BYTES: usize = 20 * 1024 * 1024;
 
+/// The attachment's content type: `mime` when it parses — a re-send
+/// that carries its source's mimetype, since the filename guess
+/// fails once the name is a staging artifact or has no extension it
+/// could carry — the extension guess otherwise, eventually
+/// application/octet-stream.
+fn attachment_content_type(path: &str, mime_override: Option<&str>) -> mime::Mime {
+    if let Some(m) = mime_override {
+        match m.parse() {
+            Ok(parsed) => return parsed,
+            Err(e) => warn!("sendAttachment: unparsable mime `{m}' ({e}); guessing by name"),
+        }
+    }
+    mime_guess::from_path(path).first_or_octet_stream()
+}
+
+/// The carried-over `SendInfo` as the SDK attachment metadata the
+/// content type selects: the ruma info structs have no common type,
+/// so image dims, a video's duration, or an audio clip's length land
+/// in their own structs — a mismatch would be ignored by the SDK.
+fn attachment_info(
+    content_type: &mime::Mime,
+    info: SendInfo,
+) -> matrix_sdk::attachment::AttachmentInfo {
+    use matrix_sdk::attachment::{
+        AttachmentInfo, BaseAudioInfo, BaseFileInfo, BaseImageInfo, BaseVideoInfo,
+    };
+
+    let width = info.width.and_then(|n| UInt::try_from(n).ok());
+    let height = info.height.and_then(|n| UInt::try_from(n).ok());
+    let size = info.size.and_then(|n| UInt::try_from(n).ok());
+    let duration = info.duration.map(Duration::from_millis);
+    match content_type.type_().as_str() {
+        "image" => AttachmentInfo::Image(BaseImageInfo {
+            height,
+            width,
+            size,
+            ..Default::default()
+        }),
+        "video" => AttachmentInfo::Video(BaseVideoInfo {
+            duration,
+            height,
+            width,
+            size,
+            ..Default::default()
+        }),
+        "audio" => AttachmentInfo::Audio(BaseAudioInfo {
+            duration,
+            size,
+            ..Default::default()
+        }),
+        _ => AttachmentInfo::File(BaseFileInfo { size }),
+    }
+}
+
 /// Send an attachment: `sendImage` and `sendFile` share the path; the
-/// message type comes from the guessed content type (`image/*` renders as
-/// `m.image`, video/audio likewise, everything else as `m.file`).
-/// `fallback_name` is the body when PATH has no file name.
+/// message type comes from the content type — `mime` when the caller
+/// carries one (a re-send that kept its source's mimetype), the
+/// filename guess otherwise (`image/*` renders as `m.image`,
+/// video/audio likewise, everything else as `m.file`).
+/// `fallback_name` is the body when PATH has no file name;
+/// `carried` re-sends the source event's info (`SendInfo`), routed
+/// into the ruma info struct the content type selects.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_send_attachment(
     daemon: SharedDaemon,
     req: Option<u64>,
@@ -6098,6 +6157,8 @@ pub async fn handle_send_attachment(
     path: String,
     fallback_name: &str,
     thread_root: Option<String>,
+    mime_override: Option<String>,
+    carried: Option<SendInfo>,
 ) {
     let Some((_, room)) = room_ctx(&daemon, req, &room_id).await else {
         return;
@@ -6141,7 +6202,7 @@ pub async fn handle_send_attachment(
         }
     };
 
-    let content_type = mime_guess::from_path(&path).first_or_octet_stream();
+    let content_type = attachment_content_type(&path, mime_override.as_deref());
     let body = std::path::Path::new(&path)
         .file_name()
         .and_then(|n| n.to_str())
@@ -6149,6 +6210,9 @@ pub async fn handle_send_attachment(
         .to_owned();
 
     let mut config = matrix_sdk::attachment::AttachmentConfig::new();
+    if let Some(info) = carried {
+        config = config.info(attachment_info(&content_type, info));
+    }
     if let Some(root) = thread_root.as_deref() {
         // Threaded attachment (MSC3440): a plain thread send, no reply
         // leg — the media content carries no relation of its own, so

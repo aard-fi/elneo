@@ -842,6 +842,54 @@ The same binding shape the `C-c ?' help window gives the render."
                 t)
       (delete-file src)))
 
+  ;; A nameless image (image events carry no filename field): the
+  ;; staged copy goes out as "forwarded" and the source event's
+  ;; mimetype and info ride the command instead — no name guess left
+  ;; between the forward and the recipient's msgtype.
+  (let ((src (make-temp-file "mx-forward-test")))
+    (write-region "x" nil src nil :silent)
+    (let ((calls (mx--with-capture
+                  (cl-letf (((symbol-function 'elneo-room--event-id-at)
+                             (lambda (_pos) "$m1"))
+                            ((symbol-function 'elneo-download-media)
+                             (lambda (_p _source _format cb _name)
+                               (funcall cb "tp"
+                                        (list '(@ok . t)
+                                              (cons 'path src))))))
+                    (with-current-buffer (mx--room-buffer)
+                      (puthash "$m1" (list :body "[image]"
+                                           :media '((source . "mxc://x/y")
+                                                    (mimetype . "image/jpeg")
+                                                    (width . 800) (height . 600)))
+                               elneo-room--seen)
+                      (elneo-room-forward (list :profile "tp" :room-id "!t")))))))
+      (mx-check "forward: a nameless image stages as forwarded"
+                (string-suffix-p
+                 "forwarded"
+                 (file-name-nondirectory (cdr (assq 'path (cdr (car calls))))))
+                t)
+      (mx-check "forward: the source mime rides the command"
+                (cdr (assq 'mime (cdr (car calls)))) "image/jpeg")
+      (mx-check "forward: only dims, no duration/size on an image"
+                (cdr (assq 'info (cdr (car calls))))
+                '((width . 800) (height . 600)))
+      (delete-file src)))
+
+  ;; The forward re-sends the source event's info, keyed per media
+  ;; kind (dims/duration/size — `elneo-room--forward-params').
+  (mx-check "forward-params: dims, duration, size in wire key order"
+            (elneo-room--forward-params
+             '((mimetype . "video/mp4") (width . 1280) (height . 720)
+               (duration . 4500) (size . 9999)))
+            '("video/mp4" ((width . 1280) (height . 720) (duration . 4500)
+                           (size . 9999))))
+  (mx-check "forward-params: an unknown mime sends nil (name guess)"
+            (elneo-room--forward-params '((filename . "x")))
+            '(nil nil))
+  (mx-check "forward-params: absent info fields are skipped"
+            (cadr (elneo-room--forward-params '((mimetype . "application/zip"))))
+            nil)
+
   (let ((elneo--rooms (make-hash-table :test 'equal)))
     (puthash (cons "p1" "!r1")
              (list :profile "p1" :room-id "!r1" :display-name "Ops1")

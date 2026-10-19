@@ -2012,7 +2012,8 @@ never answers, the copy waits for the system's /tmp cleanup."
       (copy-file path copy t t)
       (cons copy (lambda () (delete-directory dir t))))))
 
-(defun elneo-room--send-upload (profile room-id kind path callback &optional thread-root scale)
+(defun elneo-room--send-upload
+    (profile room-id kind path callback &optional thread-root scale mime info-alist)
   "Shared upload body of `elneo-room-image' and `elneo-room-file'.
 KIND is the daemon command (\"sendImage\"/\"sendFile\").  PATH is
 scaled per SCALE (`elneo--scale-image', a no-op unless a spec was
@@ -2020,7 +2021,12 @@ given and the file is a scalable image) and staged through
 `elneo--upload-stage'; every temporary copy the two steps made is
 deleted once CALLBACK has run, success or failure, even when it
 signals.  THREAD-ROOT, when non-nil, threads the attachment into
-that Matrix thread (MSC3440)."
+that Matrix thread (MSC3440).  MIME, when non-nil, rides the
+command as its `mime' key — the content type the daemon sends the
+attachment as, instead of its filename guess (a re-send that knows
+its source's mimetype).  INFO-ALIST, when non-nil, rides as the
+`info' object — the source event's media metadata (`width',
+`height', `duration', `size'), re-sent with the attachment."
   (let* ((scaled (elneo--scale-image path scale))
          (path (car scaled))
          (staged (elneo--upload-stage path))
@@ -2040,10 +2046,12 @@ that Matrix thread (MSC3440)."
                           (room_id . ,room-id)
                           (path . ,(car staged))
                           ,@(when thread-root
-                              `((thread_root . ,thread-root))))
+                              `((thread_root . ,thread-root)))
+                          ,@(when mime `((mime . ,mime)))
+                          ,@(when info-alist `((info . ,info-alist))))
                         callback)))
 
-(defun elneo-room-image (profile room-id path callback &optional thread-root scale)
+(defun elneo-room-image (profile room-id path callback &optional thread-root scale mime info-alist)
   "Upload the image file at PATH and send it to PROFILE's ROOM-ID.
 The daemon reads the file and guesses the mime type from the
 extension.  A Tramp-remote path is staged to a local temporary copy
@@ -2053,21 +2061,28 @@ with the `updateSendResult' response; check `@ok'.  THREAD-ROOT
 threads the attachment into that thread.  SCALE, non-nil
 (`elneo--scale-image' spec), rescales PATH before the upload; a
 non-image path under a given SCALE, as with a `[file:' tag, is
-sent as-is, matching the dired send."
-  (elneo-room--send-upload profile room-id "sendImage" path callback thread-root scale))
+sent as-is, matching the dired send.  MIME and INFO-ALIST name the
+content type and media metadata to send (`elneo-room--send-upload'
+docstring); a forward passes both from its source event."
+  (elneo-room--send-upload
+   profile room-id "sendImage" path callback thread-root scale mime info-alist))
 
-(defun elneo-room-file (profile room-id path callback &optional thread-root scale)
+(defun elneo-room-file (profile room-id path callback &optional thread-root scale mime info-alist)
   "Upload the file at PATH and send it to PROFILE's ROOM-ID.
 Same as `elneo-room-image' for any content: the daemon guesses the
 mime type from the extension, and the message type follows it
-(video lands as `m.video', unknown types as `m.file').  A
-Tramp-remote path is staged to a local temporary copy first — the
-daemon reads local paths only — which is removed once CALLBACK has
-run.  THREAD-ROOT threads the attachment into that thread.  SCALE,
+(video lands as `m.video', unknown types as `m.file') — unless MIME
+names the content type, which a forward passes.  A Tramp-remote
+path is staged to a local temporary copy first — the daemon reads
+local paths only — which is removed once CALLBACK has run.
+THREAD-ROOT threads the attachment into that thread.  SCALE,
 non-nil (`elneo--scale-image' spec), rescales PATH before the
 upload when PATH is an image by extension — dired and image-dired
-sends come through here — and leaves other files untouched."
-  (elneo-room--send-upload profile room-id "sendFile" path callback thread-root scale))
+sends come through here — and leaves other files untouched.
+INFO-ALIST re-sends the source event's media metadata, a forward
+passes it (`elneo-room--send-upload' docstring)."
+  (elneo-room--send-upload
+   profile room-id "sendFile" path callback thread-root scale mime info-alist))
 
 (defun elneo-room-messages (profile room-id limit from callback &optional filter)
   "Fetch a page of history for PROFILE's ROOM-ID.

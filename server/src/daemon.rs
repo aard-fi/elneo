@@ -981,6 +981,8 @@ verify this device against an existing one (M-x elneo-verify-device) instead"
                 room_id,
                 path,
                 thread_root,
+                mime,
+                info,
             } => {
                 sync::handle_send_attachment(
                     self.inner.clone(),
@@ -989,6 +991,8 @@ verify this device against an existing one (M-x elneo-verify-device) instead"
                     path,
                     "image",
                     thread_root,
+                    mime,
+                    info,
                 )
                 .await
             }
@@ -996,6 +1000,8 @@ verify this device against an existing one (M-x elneo-verify-device) instead"
                 room_id,
                 path,
                 thread_root,
+                mime,
+                info,
             } => {
                 sync::handle_send_attachment(
                     self.inner.clone(),
@@ -1004,6 +1010,8 @@ verify this device against an existing one (M-x elneo-verify-device) instead"
                     path,
                     "file",
                     thread_root,
+                    mime,
+                    info,
                 )
                 .await
             }

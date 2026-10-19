@@ -7318,9 +7318,11 @@ body rides along when the sender had one.  Replies, reactions and
 thread context stay behind — they are this room's story, and
 Matrix carries no forwarded-from marker to preserve.  Media
 re-sends through sendFile: the file lands in the daemon cache
-first when needed, then a staged copy under its original name
-keeps the mime type (the cache file is extensionless); voice
-arrives as plain audio, since the waveform is a send-time
+first when needed, then a staged copy under its original name (a
+nameless image goes out as \"forwarded\"), and the command carries
+the source's mimetype and info, so the recipient's msgtype and
+layout data match the original event knew.
+Voice arrives as plain audio, since the waveform is a send-time
 addition.  Pick ROOM with
 `elneo-completing-read-room'; with
 `elneo-room-forward-cross-account' nil the pick is limited to
@@ -7346,14 +7348,31 @@ cross-account pick means the forward goes out from that account."
                           (elneo-server--error-string event))))
              (plist-get msg :formatted-body)))
         (let* ((media (plist-get msg :media))
+               (name (or (alist-get 'filename media) "forwarded"))
                (buffer (current-buffer)))
-          (message "Matrix: downloading %s for forward..."
-                   (or (alist-get 'filename media) "media"))
+          (message "Matrix: downloading %s for forward..." name)
           (elneo-download-media
            elneo-room--profile (alist-get 'source media) "file"
            (lambda (_profile event)
              (elneo-room--on-forward-file buffer room media event))
-           (or (alist-get 'filename media) "forwarded")))))))
+           name))))))
+
+;; The forward re-sends the source event's content type and info:
+;; without them a nameless image (image events carry no filename
+;; field) staged with a bare "forwarded" name and sendFile's mime
+;; guess resulted in forwarded images with wrong mimetype - no
+;; preview, and pretty much only emacs was able to open them
+(defun elneo-room--forward-params (media)
+  "The sendFile `mime'/`info' values for forwarded media.
+The source event's mimetype and info (width/height in pixels,
+duration in ms, size in bytes) already ride the media alist —
+the forward keeps them instead of guessing the mime by name and
+leaving every other client without the original's layout data."
+  (list (alist-get 'mimetype media)
+        (delq nil (mapcar (lambda (key)
+                            (when (alist-get key media)
+                              (cons key (alist-get key media))))
+                          '(width height duration size)))))
 
 (defun elneo-room--on-forward-file (buffer room media event)
   "Send the downloaded EVENT file into ROOM, metadata from MEDIA.
@@ -7364,12 +7383,13 @@ buffer; the send does not depend on it."
              (alist-get 'path event))
     (let* ((path (alist-get 'path event))
            (name (or (alist-get 'filename media) "forwarded"))
+           (params (elneo-room--forward-params media))
            (tprofile (plist-get room :profile))
            (troom-id (plist-get room :room-id))
            (dir (make-temp-file "elneo-forward-" t))
            ;; The cache file is extensionless; the staged copy keeps
-           ;; the original name so sendFile's mime guess still lands
-           ;; an image as m.image.
+           ;; the original name, which the daemon uses as the
+           ;; event's body.
            (tmp (expand-file-name name dir)))
       (copy-file path tmp t)
       (elneo-room-file
@@ -7381,7 +7401,8 @@ buffer; the send does not depend on it."
                (message "Matrix: forward failed — %s"
                         (elneo-server--error-string event)))
            ;; The staged copy's work is done once the daemon has it.
-           (delete-directory dir t)))))))
+           (delete-directory dir t)))
+       nil nil (car params) (cadr params)))))
 
 ;; `f` shares the room's keymap with the draft, so it must self-insert
 ;; in the draft area like every other bare key (the direct bind broke
