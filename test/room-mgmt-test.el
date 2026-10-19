@@ -922,6 +922,41 @@ The same binding shape the `C-c ?' help window gives the render."
                          t)
                     t)))))
 
+  ;; Same profile and display name: the label collision case — an
+  ;; upgraded-away twin renders identically to its successor.  Both
+  ;; must appear (with their ids) and each must resolve to its own
+  ;; room; before the disambiguation assoc returned whichever room
+  ;; hash order put first, and completion showed one candidate.
+  (let ((elneo--rooms (make-hash-table :test 'equal)))
+    (puthash (cons "p1" "!dead")
+             (list :profile "p1" :room-id "!dead" :display-name "Ops"
+                   :upgraded-to "!live")
+             elneo--rooms)
+    (puthash (cons "p1" "!live")
+             (list :profile "p1" :room-id "!live" :display-name "Ops")
+             elneo--rooms)
+    (let (offered)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_p coll &rest _)
+                   (setq offered (sort (copy-sequence coll) #'string<))
+                   (car coll))))
+        ;; Each colliding room its own id-tagged label.
+        (elneo-completing-read-room "p1")
+        (mx-check "pick: both twins are offered, id-tagged"
+                  offered
+                  '("p1: Ops [!dead]" "p1: Ops [!live]"))
+        (setq offered nil)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_p coll &rest _) (car (member "p1: Ops [!live]" coll)))))
+          (let ((chosen (elneo-completing-read-room "p1")))
+            (mx-check "pick: the id-tagged label resolves to its own room"
+                      (plist-get chosen :room-id) "!live")))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_p coll &rest _) (car (member "p1: Ops [!dead]" coll)))))
+          (let ((chosen (elneo-completing-read-room "p1")))
+            (mx-check "pick: the dead twin resolves to itself too"
+                      (plist-get chosen :room-id) "!dead"))))))
+
   ;; The `f' key shares the keymap with the draft: a direct bind broke
   ;; typing f there.  The defkey wrapper must self-insert in the draft
   ;; and reach elneo-room-forward over history.

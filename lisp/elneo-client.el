@@ -138,12 +138,22 @@ eyebrowse perspective is not visible.)"
     (maphash (lambda (_key room) (push room rooms)) elneo--rooms)
     rooms))
 
+(defun elneo--room-pick-label (room)
+  "The room-pick candidate string for ROOM: \"PROFILE: NAME\"."
+  (format "%s: %s"
+          (plist-get room :profile)
+          (or (plist-get room :display-name)
+              (plist-get room :room-id))))
+
 (defun elneo-completing-read-room (&optional profile)
   "Read a room with completing-read, return its room record plist.
 Without PROFILE the pick covers every registered account's rooms;
 with PROFILE (an account name) only that account's rooms are
 offered — `elneo-room-forward-cross-account' restricts its pick
-this way.  Signals `user-error' on no choice or no room at all."
+this way.  Rooms sharing profile and display name (an
+upgraded-away twin) would render one candidate — each colliding
+room gets its id appended, so both stay visible and pickable.
+Signals `user-error' on no choice or no room at all."
   (let* ((rooms (if profile
                     (let (mine)
                       (maphash (lambda (_key room)
@@ -152,13 +162,21 @@ this way.  Signals `user-error' on no choice or no room at all."
                                elneo--rooms)
                       (nreverse mine))
                   (elneo-rooms-all)))
+         (counts
+          (let ((table (make-hash-table :test 'equal)))
+            (dolist (room rooms table)
+              (let ((label (elneo--room-pick-label room)))
+                (puthash label (1+ (gethash label table 0)) table)))))
          (table
+          ;; assoc on the chosen string returns the first match, so a
+          ;; shared label must never stand for two rooms.
           (mapcar (lambda (room)
-                    (cons (format "%s: %s"
-                                  (plist-get room :profile)
-                                  (or (plist-get room :display-name)
-                                      (plist-get room :room-id)))
-                          room))
+                    (let ((label (elneo--room-pick-label room)))
+                      (cons (if (> (gethash label counts) 1)
+                                (format "%s [%s]"
+                                        label (plist-get room :room-id))
+                              label)
+                            room)))
                   rooms))
          (choice (completing-read "Matrix room: " (mapcar #'car table) nil t)))
     (or (cdr (assoc choice table #'equal))
