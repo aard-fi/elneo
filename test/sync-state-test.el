@@ -83,6 +83,45 @@
 (mx-check "missing state left the record"
           (car (elneo-server-sync-state "t")) "synced")
 
+;; --- recovery: the daemon's retry cycle clears the error ---
+;;
+;; The long-poll only returns on error, so recovery must be announced
+;; by the daemon: "error" -> "syncing" -> "synced".  The chip follows —
+;; a stale "error" record kept the bar at ✗ and RET refused.
+
+(setq mx-fires nil)
+(let ((elneo-server--buffers
+        (list (cons "t" (get-buffer-create " *sync-t-rec*")))))
+  (unwind-protect
+      (progn
+        (elneo-server--dispatch-event
+         "t" '((@type . "updateSyncState") (state . "error")
+               (error . "dns boom")))
+        (mx-check "recovery: error recorded"
+                  (elneo-server-sync-state "t") '("error" . "dns boom"))
+        (cl-letf (((symbol-function 'elneo-server-live-p) (lambda (_p) t)))
+          (mx-check "recovery: chip down while error"
+                    (nth 2 (car (elneo-room-bar--daemon-chips))) "✗"))
+        (elneo-server--dispatch-event
+         "t" '((@type . "updateSyncState") (state . "syncing") (error . nil)))
+        (mx-check "recovery: retry announced syncing"
+                  (elneo-server-sync-state "t") '("syncing" . nil))
+        (elneo-server--dispatch-event
+         "t" '((@type . "updateSyncState") (state . "synced") (error . nil)))
+        (mx-check "recovery: back to synced"
+                  (elneo-server-sync-state "t") '("synced" . nil))
+        (mx-check "recovery: every transition fired once"
+                  mx-fires '(("t" "synced" nil)
+                             ("t" "syncing" nil)
+                             ("t" "error" "dns boom")))
+        (cl-letf (((symbol-function 'elneo-server-live-p) (lambda (_p) t)))
+          (mx-check "recovery: chip back to ●"
+                    (list (nth 2 (car (elneo-room-bar--daemon-chips)))
+                          (nth 3 (car (elneo-room-bar--daemon-chips))))
+                    '("●" success))))
+    (kill-buffer (cdr (car elneo-server--buffers)))
+    (setq elneo-server--buffers nil)))
+
 ;; --- the sentinel records offline exactly once, prunes the rest ---
 
 (mx-sync-hook-reset)

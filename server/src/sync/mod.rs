@@ -1381,7 +1381,37 @@ async fn sync_task(daemon: SharedDaemon, client: Client) {
     // callback form for one hook: unread counters can change without any
     // event we already watch (another client of this user marked the room
     // read), and the room bar would keep stale badges without this diff.
+    //
+    // The SDK loop only returns on error, so a recovered retry must be
+    // announced explicitly, or the client keeps its "error" chip and send
+    // gate through a working connection.  Retry after an announced error:
+    // "syncing", one sync_once, "synced" (or "error" again).  No
+    // re-seeding — mid-outage joins arrive as new-joined-room events.
+    let mut announced_error = false;
     loop {
+        if announced_error {
+            daemon.send(OutEvent::event(Event::UpdateSyncState {
+                state: "syncing".into(),
+                error: None,
+            }));
+            match client.sync_once(SyncSettings::default()).await {
+                Ok(_) => {
+                    daemon.send(OutEvent::event(Event::UpdateSyncState {
+                        state: "synced".into(),
+                        error: None,
+                    }));
+                }
+                Err(e) => {
+                    warn!("Sync retry failed: {}", e);
+                    daemon.send(OutEvent::event(Event::UpdateSyncState {
+                        state: "error".into(),
+                        error: Some(e.to_string()),
+                    }));
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
+                }
+            }
+        }
         let cb_daemon = daemon.clone();
         let cb_client = client.clone();
         match client
@@ -1414,6 +1444,8 @@ async fn sync_task(daemon: SharedDaemon, client: Client) {
                 // Defensive only: our callback always returns Continue, so
                 // a plain Ok means the sync loop stopped for some other
                 // reason.  Sleep briefly and restart rather than spin.
+                // `announced_error` is left alone: an announced error is
+                // re-announced next iteration, otherwise "synced" stands.
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
             Err(e) => {
@@ -1422,6 +1454,7 @@ async fn sync_task(daemon: SharedDaemon, client: Client) {
                     state: "error".into(),
                     error: Some(e.to_string()),
                 }));
+                announced_error = true;
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
