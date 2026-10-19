@@ -107,6 +107,18 @@ for a room with no upgrade history.")
   "Return the room record for PROFILE's ROOM-ID, or nil."
   (gethash (cons profile room-id) elneo--rooms))
 
+(defun elneo--room-refuse-replaced (room)
+  "Signal `user-error' naming the successor when ROOM was replaced.
+A tombstoned room is openable for history, but sends there bounce
+off the server; refusing locally says where the message goes
+instead.  ROOM nil (no record) passes — an unknown room is not
+known to be replaced."
+  (when-let* ((successor (plist-get room :upgraded-to)))
+    (user-error "Matrix: %s was replaced — send in %s instead"
+                (or (plist-get room :display-name)
+                    (plist-get room :room-id))
+                successor)))
+
 (defcustom elneo-muted-notification-modes '("mute" "mentions_and_keywords")
   "Notification modes that count as muted everywhere in the UI.
 Mentions-and-keywords is included: a room that never pings on

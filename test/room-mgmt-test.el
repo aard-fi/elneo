@@ -890,6 +890,17 @@ The same binding shape the `C-c ?' help window gives the render."
             (cadr (elneo-room--forward-params '((mimetype . "application/zip"))))
             nil)
 
+  ;; The forward refuses a replaced target before anything is staged —
+  ;; even before the message-at-point lookup.
+  (mx-check "forward: a replaced target is refused first"
+            (condition-case e
+                (progn (elneo-room-forward
+                        (list :profile "p" :room-id "!dead"
+                              :display-name "Old" :upgraded-to "!new"))
+                       'no-error)
+              (user-error e))
+            '(user-error "Matrix: Old was replaced — send in !new instead"))
+
   (let ((elneo--rooms (make-hash-table :test 'equal)))
     (puthash (cons "p1" "!r1")
              (list :profile "p1" :room-id "!r1" :display-name "Ops1")

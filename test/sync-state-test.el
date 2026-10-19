@@ -450,6 +450,52 @@ delays; returns the captured delays."
             (setq elneo-room-block-send-when-offline gate)))))
   (kill-buffer buf))
 
+;; --- replaced-room send gate: refuse before dispatch, successor named ---
+
+(let ((buf (generate-new-buffer " *sync-replaced*"))
+      (sends 0)
+      ;; Only the dead room has a record: the offline gate's buffer
+      ;; (no record) must stay unaffected by this gate.
+      (elneo--rooms (make-hash-table :test 'equal)))
+  (puthash (cons "t" "!dead")
+           (list :profile "t" :room-id "!dead" :display-name "Old"
+                 :upgraded-to "!new")
+           elneo--rooms)
+  (unwind-protect
+      (progn
+        (with-current-buffer buf
+          (elneo-room-mode)
+          (setq-local elneo-room--profile "t")
+          (setq-local elneo-room--room-id "!dead")
+          (setq elneo-room--backfilled t)
+          (insert "header\n")
+          (elneo-room--reset-input-area "draft text"))
+        (cl-letf (((symbol-function 'elneo-room--dispatch-input)
+                   (lambda (_text &optional _) (setq sends (1+ sends)))))
+          (with-current-buffer buf
+            (mx-check "replaced: sends refused, successor named"
+                      (condition-case e
+                          (progn (elneo-room--input-send) 'no-error)
+                        (user-error
+                         (and (string-search "!new"
+                                             (error-message-string e))
+                              t))
+                        (error 'error))
+                      t)
+            (mx-check "replaced: draft kept"
+                      (elneo-room--draft-text) "draft text")
+            (mx-check "replaced: nothing dispatched" sends 0)
+            ;; A record without an upgrade passes the gate.
+            (puthash (cons "t" "!dead")
+                     (list :profile "t" :room-id "!dead"
+                           :display-name "Old")
+                     elneo--rooms)
+            (elneo-room--input-send)
+            (mx-check "replaced: a live room sends" sends 1)
+            (mx-check "replaced: a live room clears the draft"
+                      (elneo-room--draft-text) "")))))
+  (kill-buffer buf))
+
 ;; --- history-refetch retry: a bounced backfill routes off the
 ;; requesting buffer ---
 

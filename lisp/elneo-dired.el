@@ -132,7 +132,8 @@ A prefix argument asks once for an image scale (a longest-edge
 size like 1920 or a percentage like 50%) applied to every image
 in the batch; empty input at the prompt sends the originals.
 Without one, an image over `elneo-image-oversize-limit' is asked
-about first.  Non-interactively, FILES is the list, ROOM
+about first.  A room replaced by an upgrade refuses the send with
+the successor named.  Non-interactively, FILES is the list, ROOM
 the room record and SCALE the spec (or nil — see
 `elneo-room-image')."
   (interactive
@@ -153,6 +154,8 @@ the room record and SCALE the spec (or nil — see
          (profile (plist-get room :profile))
          (room-id (plist-get room :room-id))
          (name (or (plist-get room :display-name) room-id)))
+    ;; A replaced room takes no sends; refuse before the first upload.
+    (elneo--room-refuse-replaced room)
     (dolist (file files)
       (unless (stringp file)
         (user-error "Not a file path: %S" file))

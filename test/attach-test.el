@@ -285,6 +285,24 @@
             (mx-check "send-files: no prompt happened" prompted nil)))
       (delete-directory dir t)))
 
+  ;; A replaced room takes no sends: the refusal names the successor
+  ;; and no upload starts.
+  (let ((sent 0))
+    (cl-letf (((symbol-function 'elneo-room-file)
+               (lambda (&rest _) (setq sent (1+ sent)))))
+      (mx-check "send-files: replaced room refused, successor named"
+                (condition-case e
+                    (progn (elneo-dired-send-files
+                            (list "/d/a.png")
+                            (list :profile "p" :room-id "!dead"
+                                  :display-name "Old"
+                                  :upgraded-to "!new")
+                            nil)
+                           'no-error)
+                  (user-error e))
+                '(user-error "Matrix: Old was replaced — send in !new instead"))
+      (mx-check "send-files: nothing sent into the replaced room" sent 0)))
+
   ;; A killed target or a plain dired (no pick target) refuses, and no
   ;; marks at all is an error rather than a silent no-op.
   (let ((room (mx-attach-setup))

@@ -3142,7 +3142,9 @@ Emacs restart."
 With a SCALE spec (from the RET prefix argument), it applies to
 every image upload the draft dispatches.  Without one, an image
 over `elneo-image-oversize-limit' is asked about first
-\(`elneo--scale-oversize-answer').  Empty (whitespace-only) drafts are ignored.
+\(`elneo--scale-oversize-answer').  A room replaced by an
+upgrade refuses the send with the successor named.  Empty
+(whitespace-only) drafts are ignored.
 The text leaves the buffer only after every segment was handed to
 the daemon — a signal from a dead daemon
 (`elneo-server--send') must not eat the draft, so sending happens
@@ -3151,6 +3153,10 @@ one signals) leaves the whole draft in place; the user edits out
 what already went."
   (let ((text (elneo-room--draft-text)))
     (when (> (length (string-trim text)) 0)
+      ;; The replaced gate first: a dead room is dead whatever the
+      ;; connection state says.
+      (elneo--room-refuse-replaced
+       (elneo-room-get elneo-room--profile elneo-room--room-id))
       (elneo-room--gate-offline)
       ;; Faces ride along when `elneo-room-yank-fontify' is on: the
       ;; dispatch regex slices with `substring', which preserves text
@@ -7335,11 +7341,16 @@ addition.  Pick ROOM with
 `elneo-completing-read-room'; with
 `elneo-room-forward-cross-account' nil the pick is limited to
 this buffer's account, otherwise it covers every account — a
-cross-account pick means the forward goes out from that account."
+cross-account pick means the forward goes out from that account.
+A room replaced by an upgrade refuses the forward with the
+successor named."
   (interactive
    (list (if elneo-room-forward-cross-account
              (elneo-completing-read-room)
            (elneo-completing-read-room elneo-room--profile))))
+  ;; A replaced target would bounce the forward off the server; say
+  ;; so before anything is staged.
+  (elneo--room-refuse-replaced room)
   (let* ((id (elneo-room--event-id-at (point)))
          (msg (and id (gethash id elneo-room--seen))))
     (if (null msg)
