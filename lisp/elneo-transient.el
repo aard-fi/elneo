@@ -147,7 +147,7 @@ visit, one action."
     ("f" "Forget the room" elneo-room-forget)]
    ["Anywhere"
     ("j" "Join a room" elneo-room-join)
-    ("s" "Browse a space's rooms" elneo-space-browse)
+    ("S" "Browse a space's rooms" elneo-space-browse)
     ("c" "Create a new room" elneo-room-create)
     ("d" "Start a direct message" elneo-start-dm)
     ("p" "Your account (profile and security)" elneo-account)]])
