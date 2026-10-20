@@ -2398,6 +2398,20 @@ topic updates via the room's `C-c ?' view and `updateRoom' event."
                         (topic . ,(or topic "")))
                       callback))
 
+(defun elneo-set-notification-mode (profile room-id mode callback)
+  "Set PROFILE's ROOM-ID's notification MODE.
+MODE is a daemon wire word: \"all_messages\",
+\"mentions_and_keywords\" or \"mute\".  Push rules are this
+account's alone, so no permission gates the call.  CALLBACK
+\(PROFILE RESPONSE-EVENT) receives the plain ack; the new mode
+shows in the room's `C-c ?' view with the next sync's push-rules
+echo."
+  (elneo-server--call profile
+                      `((@type . "setNotificationMode")
+                        (room_id . ,room-id)
+                        (mode . ,mode))
+                      callback))
+
 (defun elneo-set-room-avatar (profile room-id path callback)
   "Set PROFILE's ROOM-ID's avatar to the image at PATH.
 PATH nil removes the avatar.  The mime type is the daemon's to

@@ -6035,19 +6035,17 @@ no room content)."
               (plist-get room :room-id) id)))
           (princ "\n"))))))
 
-(defun elneo-room--settings-notifications (room)
-  "The activity facts and the notifications section's mode row."
+(defun elneo-room--settings-notifications (room buf joined)
+  "The activity facts and the notifications section's mode row.
+A joined room carries the mode row's edit button — push rules are
+this account's alone, so nothing gates it but the join."
   (let ((mode (plist-get room :notification-mode))
         (user-defined (plist-get room :notification-mode-user-defined))
         (unread (plist-get room :unread))
         (highlights (plist-get room :highlights)))
     ;; The user-defined mode is reported separately so "muted,
     ;; user-set" is distinguishable from a room-type default.
-    (let ((mode-label (pcase mode
-                        ("all_messages" "all messages")
-                        ("mentions_and_keywords" "mentions and keywords only")
-                        ("mute" "muted")
-                        (_ "unknown")))
+    (let ((mode-label (elneo-room--notification-mode-label mode))
           (mode-source (cond
                         ((and mode user-defined) " (user-set)")
                         (mode " (default for room type)")
@@ -6059,7 +6057,12 @@ no room content)."
                        (format-time-string "%Y-%m-%d %H:%M"
                                            (/ (plist-get room :last-activity) 1000)))))
       (princ "\nNotifications:\n")
-      (princ (format "  Mode:          %s%s\n" mode-label mode-source)))))
+      (princ (format "  Mode:          %s%s" mode-label mode-source))
+      (when joined
+        (elneo-room--settings-button "[mode]" "Set the room's notification mode"
+                                     (elneo-room--settings-in-room
+                                      buf #'elneo-room-set-notification-mode)))
+      (princ "\n"))))
 
 (defun elneo-room--settings-permissions (perms)
   "The permission-gates block from the room buffer's snapshot PERMS.
@@ -6156,7 +6159,7 @@ a scroll past data nobody asked to see."
     (elneo-room--settings-avatar room buf joined)
     (elneo-room--settings-memberships room)
     (elneo-room--settings-pinned room buf)
-    (elneo-room--settings-notifications room)
+    (elneo-room--settings-notifications room buf joined)
     (elneo-room--settings-buttons room buf)
     ;; The room's power levels as this session sees them: the level
     ;; with what is still ours to change — the same gates the buttons
@@ -6373,6 +6376,51 @@ rendered here, only in clients that format topics."
                              event
                              (format "set the topic of %s" room-name)
                              "topic change failed")))))
+
+(defun elneo-room--notification-mode-label (mode)
+  "The human friendly wording of the notification MODE wire word."
+  (pcase mode
+    ("all_messages" "all messages")
+    ("mentions_and_keywords" "mentions and keywords only")
+    ("mute" "muted")
+    (_ "unknown")))
+
+(defun elneo-room-set-notification-mode (mode)
+  "Set this room's notification MODE (this account's alone).
+Notification is an account specific setting - as it won't modify the room
+there's no gating (apart from having joined the room)."
+  (interactive
+   (progn (elneo-room--ident)
+          (let ((version (elneo-server--daemon-protocol
+                          elneo-room--profile)))
+            (unless (and version (>= version 25))
+              (user-error "Setting the notification mode needs protocol 25 — %s's daemon speaks %s; update elneo-server"
+                          elneo-room--profile (or version "nothing"))))
+          (list (completing-read
+                 "Notification mode: "
+                 '("all messages" "mentions and keywords only" "muted")
+                 nil t nil nil
+                 ;; The view's own wording, with the current mode as
+                 ;; the default — one vocabulary everywhere.
+                 (elneo-room--notification-mode-label
+                  (plist-get (elneo-room-get elneo-room--profile
+                                             elneo-room--room-id)
+                             :notification-mode))))))
+  (pcase-let* ((`(,profile . ,room-id) (elneo-room--ident))
+               ;; Captured now: the ack below runs on the daemon's
+               ;; process buffer, where the locals do not exist.
+               (room-name (elneo-room--room-display-name))
+               (wire (pcase mode
+                       ("all messages" "all_messages")
+                       ("mentions and keywords only" "mentions_and_keywords")
+                       ("muted" "mute"))))
+    (elneo-set-notification-mode
+     profile room-id wire
+     (lambda (_profile event)
+       (elneo-room--ack-message
+        event
+        (format "set %s to %s" room-name mode)
+        "notification mode not changed")))))
 
 (defun elneo-room--avatar-change (path)
   "Send PATH as the current room's new avatar; nil removes it.

@@ -139,6 +139,7 @@ visit, one action."
     ("n" "Set the room's name" elneo-room-set-name)
     ("t" "Set the topic" elneo-room-set-topic)
     ("a" "Set the room's avatar" elneo-room-set-avatar)
+    ("m" "Set the notification mode" elneo-room-set-notification-mode)
     ("N" "Set your nick in this room" elneo-room-set-nick)
     ("i" "Invite a user" elneo-room-invite)
     ("k" "Kick a user" elneo-room-kick)

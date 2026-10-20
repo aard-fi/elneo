@@ -2938,6 +2938,18 @@ fn notification_mode_string(mode: RoomNotificationMode) -> &'static str {
     }
 }
 
+/// The reverse of `notification_mode_string`: a wire word back to the
+/// SDK mode.  Hand-mapped like its twin; None for any other word —
+/// a case-mangled "Mute" is a client bug, not a default to guess.
+fn notification_mode_from_str(word: &str) -> Option<RoomNotificationMode> {
+    match word {
+        "all_messages" => Some(RoomNotificationMode::AllMessages),
+        "mentions_and_keywords" => Some(RoomNotificationMode::MentionsAndKeywordsOnly),
+        "mute" => Some(RoomNotificationMode::Mute),
+        _ => None,
+    }
+}
+
 /// Protocol name of the bridge relaying this room, read from a bridge
 /// state event's content (MSC 2346): `protocol.displayname` when set,
 /// else `protocol.id`.  An empty content object means the bridge is
@@ -5461,6 +5473,49 @@ pub(crate) async fn handle_set_room_topic(
                 req,
                 false,
                 Some(format!("Topic change failed: {e}")),
+            ));
+        }
+    }
+}
+
+/// Push rules are this account's, so no room power level gates the
+/// change.  The setter applies the new rules to the SDK's local cache
+/// and is a no-op when the user-defined mode already matches (a plain
+/// ok ack stays correct); the summaries re-broadcast with the
+/// m.push_rules echo of the next sync, like a mute set from another
+/// client (see the sync callback).
+pub(crate) async fn handle_set_notification_mode(
+    daemon: SharedDaemon,
+    req: Option<u64>,
+    room_id: String,
+    mode: String,
+) {
+    // The word check first: a bad word is a client bug whatever the
+    // session state.
+    let Some(mode) = notification_mode_from_str(&mode) else {
+        daemon.send(OutEvent::ack(
+            req,
+            false,
+            Some(format!("Unknown notification mode: {mode}")),
+        ));
+        return;
+    };
+    let Some((client, room)) = room_ctx(&daemon, req, &room_id).await else {
+        return;
+    };
+    match client
+        .notification_settings()
+        .await
+        .set_room_notification_mode(room.room_id(), mode)
+        .await
+    {
+        Ok(()) => daemon.send(OutEvent::ack(req, true, None)),
+        Err(e) => {
+            tracing::error!("setNotificationMode {room_id} failed: {e}");
+            daemon.send(OutEvent::ack(
+                req,
+                false,
+                Some(format!("Notification mode change failed: {e}")),
             ));
         }
     }

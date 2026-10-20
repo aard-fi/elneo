@@ -56,6 +56,25 @@ fn pinned_from_state_reads_the_content_array() {
 }
 
 #[test]
+fn notification_mode_wire_words_round_trip() {
+    // Each wire word parses back to the mode that produces it.
+    for (word, mode) in [
+        ("all_messages", RoomNotificationMode::AllMessages),
+        (
+            "mentions_and_keywords",
+            RoomNotificationMode::MentionsAndKeywordsOnly,
+        ),
+        ("mute", RoomNotificationMode::Mute),
+    ] {
+        assert_eq!(notification_mode_from_str(word), Some(mode));
+        assert_eq!(notification_mode_string(mode), word);
+    }
+    // Unknown and case-mangled words read as client bugs, not defaults.
+    assert_eq!(notification_mode_from_str("shout"), None);
+    assert_eq!(notification_mode_from_str("Mute"), None);
+}
+
+#[test]
 fn key_arrivals_coalesce_to_distinct_rooms() {
     let rooms = coalesce_rooms([
         room_id("!a:hs"),

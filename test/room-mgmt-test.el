@@ -119,6 +119,11 @@ The same binding shape the `C-c ?' help window gives the render."
             (cdar (mx--with-capture (elneo-set-room-topic "p" "!r" nil #'ignore)))
             '((@type . "setRoomTopic") (room_id . "!r") (topic . "")))
 
+  (mx-check "wrapper: setNotificationMode payload"
+            (cdar (mx--with-capture
+                   (elneo-set-notification-mode "p" "!r" "mute" #'ignore)))
+            '((@type . "setNotificationMode") (room_id . "!r") (mode . "mute")))
+
   (mx-check "wrapper: setOwnDisplayName payload"
             (cdar (mx--with-capture
                    (elneo-set-own-room-display-name "p" "!r" "Nick" #'ignore)))
@@ -779,6 +784,79 @@ The same binding shape the `C-c ?' help window gives the render."
                             (buffer-string)))
                          t)
                     t))
+      (kill-buffer room-buf)))
+
+  ;; --- notification mode: the [mode] button and its command
+  ;;     (push rules are account data: the join is the only gate)
+
+  (let ((room-buf (mx--room-buffer))
+        ;; the gate's apostrophe renders with the ambient style
+        ;; unless pinned; grave matches the source text exactly
+        (text-quoting-style 'grave))
+    (unwind-protect
+        (with-current-buffer room-buf
+          (setq-local elneo-room--permissions nil)
+          (mx-check "settings: a joined room shows the [mode] button"
+                    (mx--settings-bools
+                     (list :profile "mxtest" :room-id "!room"
+                           :display-name "Ops" :unread 0 :highlights 0
+                           :room-state "joined")
+                     room-buf
+                     '("[mode]"))
+                    '(t))
+          (mx-check "settings: a left room hides the [mode] button"
+                    (mx--settings-bools
+                     (list :profile "mxtest" :room-id "!room"
+                           :display-name "Ops" :unread 0 :highlights 0
+                           :room-state "left")
+                     room-buf
+                     '("[mode]"))
+                    '(nil))
+          (mx-check "settings: the mode row words a user-set mute"
+                    (and (string-search
+                          "  Mode:          muted (user-set)"
+                          (mx--overview
+                           (list :profile "mxtest" :room-id "!room"
+                                 :display-name "Ops" :unread 0
+                                 :highlights 0 :room-state "joined"
+                                 :notification-mode "mute"
+                                 :notification-mode-user-defined "mute")
+                           room-buf))
+                         t)
+                    t)
+          ;; The command maps the prompt's label to the wire word;
+          ;; the buffer locals ride the payload, the room name rides
+          ;; the callback closure (the ack runs on the daemon's
+          ;; process buffer).
+          (cl-letf (((symbol-function 'elneo-server--daemon-protocol)
+                     (lambda (_profile) 25))
+                    ((symbol-function 'completing-read)
+                     (lambda (_prompt _coll &rest _ignored) "muted")))
+            (mx-check "command: the label maps to the wire word"
+                      (cdar (mx--with-capture
+                             (call-interactively
+                              #'elneo-room-set-notification-mode)))
+                      '((@type . "setNotificationMode")
+                        (room_id . "!room") (mode . "mute"))))
+          ;; Old daemons are refused before the prompt.
+          (cl-letf (((symbol-function 'elneo-server--daemon-protocol)
+                     (lambda (_profile) 24)))
+            (mx-check "gate: the notification mode needs protocol 25"
+                      (condition-case err
+                          (progn (call-interactively
+                                  #'elneo-room-set-notification-mode)
+                                 t)
+                        (user-error (error-message-string err)))
+                      "Setting the notification mode needs protocol 25 — mxtest's daemon speaks 24; update elneo-server"))
+          (cl-letf (((symbol-function 'elneo-server--daemon-protocol)
+                     (lambda (_profile) nil)))
+            (mx-check "gate: a pre-versioning daemon is refused too"
+                      (condition-case err
+                          (progn (call-interactively
+                                  #'elneo-room-set-notification-mode)
+                                 t)
+                        (user-error (error-message-string err)))
+                      "Setting the notification mode needs protocol 25 — mxtest's daemon speaks nothing; update elneo-server")))
       (kill-buffer room-buf)))
 
   ;; The command sends the avatar change; the empty answer is a clear.

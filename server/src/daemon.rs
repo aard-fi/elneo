@@ -864,6 +864,9 @@ verify this device against an existing one (M-x elneo-verify-device) instead"
             Command::SetRoomTopic { room_id, topic } => {
                 sync::handle_set_room_topic(self.inner.clone(), req, room_id, topic).await
             }
+            Command::SetNotificationMode { room_id, mode } => {
+                sync::handle_set_notification_mode(self.inner.clone(), req, room_id, mode).await
+            }
             Command::SetOwnDisplayName { room_id, name } => {
                 sync::handle_set_own_display_name(self.inner.clone(), req, room_id, name).await
             }

@@ -128,7 +128,15 @@ use serde::{Deserialize, Serialize};
 ///    [`SendInfo`]).  A forward uses both so the re-send stays the media
 ///    kind it was; without them the daemon falls back to the old name
 ///    guess, so old clients keep working.
-pub const PROTOCOL_VERSION: u32 = 24;
+/// 25: the `setNotificationMode` command: sets a joined room's
+///    notification mode for this account — `mode` is one of the wire
+///    words the summaries already report ("all_messages",
+///    "mentions_and_keywords", "mute").  Push rules are account data,
+///    so no power level gates it; the new mode flows back with the
+///    m.push_rules echo of the next sync.  Old clients never send it and
+///    old daemons just answer `@ok: false` on its wire word, so both
+///    sides keep working.
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// serde `skip_serializing_if` helper: false-valued createRoom flags
 /// (public, is_direct) stay off the wire — deserialization defaults
@@ -345,6 +353,13 @@ pub enum Command {
     /// flows back as a normal `updateRoom`.
     #[serde(rename = "setRoomTopic")]
     SetRoomTopic { room_id: String, topic: String },
+    /// Set a joined room's notification MODE for this account — one of
+    /// "all_messages", "mentions_and_keywords" or "mute", the same wire
+    /// words the summaries report.  Push rules are account data, so no
+    /// power level gates it.  Responds ok; the new mode flows back with
+    /// the m.push_rules echo of the next sync.
+    #[serde(rename = "setNotificationMode")]
+    SetNotificationMode { room_id: String, mode: String },
     /// Set the session account's display name AS THIS ROOM SEES IT:
     /// the `m.room.member` state displayname, not the global profile
     /// (an omitted NAME clears it back — the room then falls to the
@@ -1628,6 +1643,14 @@ mod tests {
                     topic: "New topic".into(),
                 },
                 json!({"@type": "setRoomTopic", "room_id": "!r:hs", "topic": "New topic"}),
+            ),
+            (
+                Command::SetNotificationMode {
+                    room_id: "!r:hs".into(),
+                    mode: "mentions_and_keywords".into(),
+                },
+                json!({"@type": "setNotificationMode", "room_id": "!r:hs",
+                       "mode": "mentions_and_keywords"}),
             ),
             (
                 Command::SetOwnDisplayName {
@@ -3078,7 +3101,7 @@ mod tests {
                     release: RELEASE_VERSION.into(),
                 },
                 json!({
-                    "@type": "daemonInfo", "protocol": 24,
+                    "@type": "daemonInfo", "protocol": 25,
                     "release": env!("CARGO_PKG_VERSION")
                 }),
             ),
