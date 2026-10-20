@@ -78,6 +78,8 @@ TL;DR: Pretty much everything apart from voice calling/messaging and video calli
 
 Fastest possible: =make autoloads=, and starting should guide you through downloading =elneo-server= matching your system from the releases page. If that fails, manually download it and place it in your path.
 
+The server can be upgraded using =elneo-upgrade-server=, which usually only is required when the client warns about an outdated server version.
+
 #+begin_src elisp
 (add-to-list 'load-path "/path/to/elneo/lisp")
 (require 'elneo-autoloads)
@@ -98,14 +100,18 @@ Install the binary somewhere on your =PATH=, or point =elneo-server-command= at 
 
 * Usage
 
-- =M-x elneo-add-account= — log in an account (idempotent); a fresh account picks up cross-signing, secret storage and key backup in the background.
-- =M-x elneo-start= — bring all accounts online, show the room bar
+- =M-x elneo-add-account= — log in an account (idempotent); a fresh account picks up cross-signing, secret storage and key backup in the background. You don't need to repeat that after adding accounts - they persist.
+- =M-x elneo-start= — bring all accounts online, show the room bar. After accounts are added this is the main entry point.
+- =M-x elneo-quit= - end the current session, kill all open elneo buffers.
 - =M-x elneo-logout-account= — log an account out server-side; its daemon stops, its rooms close, and the registration stays for a re-login - which will create a new session (device) server side
 - =M-x elneo-forget-profile= — delete the registration *and* the profile's on-disk state (session dir with the crypto stores, media cache): the hard uninstall for one account, with a confirmation.
   =M-x elneo-forget-all-profiles= clears every registered profile the same way
 - =M-x elneo-setup-cross-signing= — bootstrap cross-signing keys by hand.  Rarely needed: a first-time account gets its keys, secret storage and key backup automatically at login, and a re-login silently adopts the stored recovery key. This is the escape hatch for when that background bring-up failed, or the account's crypto state is inconsistent — and only when this is the account's first device; with another verified device, verify this device instead.
 
-Keys are listed in the [[Keybindings]] table. When sensible Telega bindings are used, for details see the [[Telega comparison]].
+Keys are listed in the [[Keybindings]] table. When sensible Telega bindings are used, for details see the [[Telega comparison]]. The most important keybindings for discovering stuff are:
+
+- in a room, =C-c C-m= for room actions transient, =C-c ?= for room info (most actions also available as buttons there), =C-c  C-b= for the room bar actions transient
+- in the room bar, =m= to open the room bar transient. Consider binding =elneo-room-bar-options= to a global key combination.
 
 ** Room buffers
 
