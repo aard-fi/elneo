@@ -123,6 +123,12 @@ explicit per-buffer override (`T' in the room) keep theirs."
                               ('open "opens it") ('double "opens on double click")
                               (_ "moves point only"))))
      elneo-room-bar-cycle-click-action :transient t)
+    ("w" (lambda () (format "Bar shape: %s"
+                            (if (and (buffer-live-p elneo-room-bar--buffer)
+                                     (with-current-buffer elneo-room-bar--buffer
+                                       (eq elneo-room-bar--state 'rail)))
+                                "rail" "wide bar")))
+     elneo-room-bar-toggle-state :transient t)
     ("r" "Refresh now" elneo-room-bar-refresh-full :transient t)
     ("b" "Toggle the room bar (show/hide)"
      elneo-room-bar-toggle-visibility :transient t)]])

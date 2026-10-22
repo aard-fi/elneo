@@ -21,6 +21,13 @@
 ;; account.  Per-room lines update incrementally in place; a full
 ;; re-render happens when sorting/grouping/filtering changes, and on
 ;; room updates when `elneo-room-bar-live-sort' is on.
+;;
+;; Two shapes, one shared buffer: the wide bar above, and a compact
+;; rail (avatar initial plus unread badge, one row per room) for
+;; narrow frames and touch — `w', the « and » handles toggle between
+;; them (`elneo-room-bar-resting-state' picks where a fresh bar
+;; starts).  Controls and section headers are wide-bar only; rows
+;; and tap-to-open work identically in both.
 
 ;;; Code:
 
@@ -54,6 +61,28 @@
 (defcustom elneo-room-bar-height 12
   "Height (lines) of the room bar when on the top or bottom."
   :type 'integer
+  :group 'elneo-ui)
+
+(defcustom elneo-room-bar-rail-width 4
+  "Width (columns) of the room bar in its collapsed rail state.
+The rail shows one row per room — avatar initial plus unread badge
+— with no names, previews or controls; `w' in the bar (or the «
+handle) toggles between it and the full bar."
+  :type 'integer
+  :group 'elneo-ui)
+
+(defcustom elneo-room-bar-resting-state 'auto
+  "The shape a freshly created room bar starts in.
+`auto' derives it from the frame: the rail while the wide bar
+would take half the frame's columns or more (a phone-sized
+frame), the wide bar when there is room to spare.  `rail' and
+`wide' pin it — the rail on a desktop pairs well with a generous
+`elneo-room-bar-width'.  Toggling (`w' in the bar) overrides this
+for the session; the bar buffer, not the setting, holds the
+current state."
+  :type '(choice (const :tag "Rail on narrow frames, wide otherwise" auto)
+                 (const :tag "Always start wide" wide)
+                 (const :tag "Always start as the rail" rail))
   :group 'elneo-ui)
 
 (defvar elneo-room-bar-sort 'activity
@@ -272,6 +301,13 @@ process is gone (``offline''), or it is alive but cannot sync
 (defvar elneo-room-bar--full-timer nil
   "Timer coalescing bursts of full re-renders (e.g. at startup seed).")
 
+;; Buffer-local: the bar buffer is shared by every frame's bar
+;; window, so the shape is shared too — toggling re-displays all of
+;; them at the new width.  nil (a bar predating this variable) is the
+;; wide bar.
+(defvar-local elneo-room-bar--state nil
+  "Current bar shape on the bar buffer: `rail' or `wide' (nil: wide).")
+
 ;; Assigned with setq (defvar declared above the block): a plain
 ;; `defvar' with an initial value keeps the OLD keymap object when the
 ;; file is reloaded, leaving existing bar buffers with stale bindings.
@@ -290,6 +326,7 @@ process is gone (``offline''), or it is alive but cannot sync
         (define-key map (kbd "p") #'elneo-room-bar-cycle-preview)
         (define-key map (kbd "v") #'elneo-room-bar-toggle-avatars)
         (define-key map (kbd "l") #'elneo-room-bar-toggle-live-sort)
+        (define-key map (kbd "w") #'elneo-room-bar-toggle-state)
         (define-key map (kbd "k") #'elneo-room-bar-cycle-click-action)
         (define-key map (kbd "i") #'elneo-room-bar-settings-at-point)
         (define-key map (kbd "b") #'elneo-room-bar-browse-space-at-point)
@@ -340,6 +377,26 @@ workspace is not found here."
        (cl-find-if (lambda (w) (eq (window-buffer w) elneo-room-bar--buffer))
                    (window-list (or frame (selected-frame)) 'no-minibuf))))
 
+(defun elneo-room-bar--width ()
+  "Columns for a newly displayed bar window, per the bar buffer's state.
+The rail is deliberately narrow; everything else is the full
+`elneo-room-bar-width' (nil state — a bar without one yet — is the
+wide bar)."
+  (if (and (buffer-live-p elneo-room-bar--buffer)
+           (with-current-buffer elneo-room-bar--buffer
+             (eq elneo-room-bar--state 'rail)))
+      elneo-room-bar-rail-width
+    elneo-room-bar-width))
+
+(defun elneo-room-bar--resting-state ()
+  "The shape a freshly created bar starts in (see
+`elneo-room-bar-resting-state').  `auto' looks at the frame: the
+rail while the wide bar would claim half its columns or more."
+  (pcase elneo-room-bar-resting-state
+    ('rail 'rail)
+    ('wide 'wide)
+    (_ (if (< (frame-width) (* 2 elneo-room-bar-width)) 'rail 'wide))))
+
 (defun elneo-room-bar--display-buffer (&optional frame)
   "Display the room bar as a side window of FRAME (the selected by default).
 The `window-side' parameter plus a dedicated window and
@@ -354,7 +411,7 @@ on the chosen side (for example a user-pinned non-bar one),
                   (window-parameters . ((no-delete-other-windows . t)))))
          (size-spec (if (memq elneo-room-bar-side '(top bottom))
                         `(window-height . ,elneo-room-bar-height)
-                      `(window-width . ,elneo-room-bar-width)))
+                      `(window-width . ,(elneo-room-bar--width))))
          (frame (if (frame-live-p frame) frame (selected-frame))))
     (or (elneo-room-bar--window-in-frame frame)
         (let ((window (if (eq frame (selected-frame))
@@ -439,12 +496,39 @@ and stays up to date, so showing it again is instant."
       (elneo-room-bar--display-buffer)
       (message "Matrix: room bar shown"))))
 
+(defun elneo-room-bar-toggle-state (&optional state)
+  "Toggle the room bar between the wide bar and the compact rail.
+With STATE (`rail' or `wide'), switch to that shape instead of
+toggling.  The shape lives on the shared bar buffer, so every
+frame showing the bar is re-displayed at the new width — the width
+sits on the window, so a plain resize would not do.  A bar parked
+in a non-visible window configuration (eyebrowse) keeps its old
+window; the next `elneo-room-bar-show' on its frame fixes it."
+  (interactive)
+  (elneo-room-bar--ensure)
+  (with-current-buffer elneo-room-bar--buffer
+    (setq elneo-room-bar--state
+          (or state (if (eq elneo-room-bar--state 'rail) 'wide 'rail))))
+  (dolist (frame (visible-frame-list))
+    (let ((window (elneo-room-bar--window-in-frame frame)))
+      (when window
+        (delete-window window)
+        (elneo-room-bar--display-buffer frame))))
+  (elneo-room-bar-refresh-full)
+  (message "Matrix: room bar %s"
+           (if (with-current-buffer elneo-room-bar--buffer
+                 (eq elneo-room-bar--state 'rail))
+               "folded to the rail" "expanded")))
+
 (defun elneo-room-bar--ensure ()
   "Create the bar buffer, hooks and state if needed."
   (unless (buffer-live-p elneo-room-bar--buffer)
     (setq elneo-room-bar--buffer (get-buffer-create "*Matrix Rooms*"))
     (with-current-buffer elneo-room-bar--buffer
       (elneo-room-bar-mode)
+      ;; The shape a fresh bar starts in — the resting state, once,
+      ;; at creation (later toggles are session state on this buffer).
+      (setq elneo-room-bar--state (elneo-room-bar--resting-state))
       ;; Buffer-local, and on the bar buffer: a bare add-hook would
       ;; stamp the kill hook on whichever buffer --ensure ran with.
       (add-hook 'kill-buffer-hook #'elneo-room-bar--on-kill nil t))
@@ -724,7 +808,9 @@ link, the marker only says where to look.  An empty
 
 (defun elneo-room-bar--row-lines ()
   "Number of text lines each room row occupies."
-  (if (eq elneo-room-bar-preview-style 'below) 2 1))
+  (if (and (not (eq elneo-room-bar--state 'rail))
+           (eq elneo-room-bar-preview-style 'below))
+      2 1))
 
 (defun elneo-room-bar--flatten-newlines (s)
   "Replace newlines in S with spaces, so a message body (the
@@ -737,62 +823,79 @@ previews come from remote data — anything can be in them."
 (defun elneo-room-bar--row-text (room)
   "The bar text for ROOM (no trailing newline), honoring the
 `elneo-room-bar-preview-style' and `elneo-room-bar-avatars'."
-  (let* (;Anon mode fakes a render copy (name, preview); the registry
-         ;; record and the row properties stay raw.
-         (room (if elneo-anon-mode (elneo-anon--room room) room))
-         (unread (plist-get room :unread))
-         (highlights (plist-get room :highlights))
-         (name (truncate-string-to-width
-                (or (elneo-room-bar--flatten-newlines
-                     (plist-get room :display-name))
-                    "?")
-                elneo-room-bar-name-width nil nil "…"))
-         (preview (elneo-room-bar--flatten-newlines
-                   (plist-get room :preview)))
-         (prefix
-          (concat
-           (elneo-room-bar--avatar-prefix room)
-           (elneo-room-bar--account-prefix room)
-           (elneo-room-bar--dm-prefix room)
-           (elneo-room-bar--space-prefix room)
-           (elneo-room-bar--upgrade-prefix room)
-           (elneo-room-bar--muted-prefix room)
-           ;; The invite glyph shows only in `inline' mode — under the
-           ;; Invites section header the row is already unambiguous.
-           (when (and (elneo-room-bar--invite-p room)
-                      (eq elneo-room-invite-display 'inline))
-             elneo-room-bar-invite-glyph)
-           (cond
-            ((> highlights 0) (format "!%d " highlights))
-            ((> unread 0) (format "%d " unread))
-            (t ""))))
-         (name-line (format "%s%s" prefix name))
-         (preview-text
-          (lambda (p)
-            (truncate-string-to-width
-             p
-             (if (eq elneo-room-bar-preview-style 'below)
-                 ;; The second line has the whole bar width to itself.
-                 (max 10 (- elneo-room-bar-width 4))
-               elneo-room-bar-preview-length)
-             nil nil "…"))))
-    (pcase elneo-room-bar-preview-style
-      ('none name-line)
-      ('below
-       ;; Always exactly two lines: `elneo-room-bar--put-row' and
-       ;; `elneo-room-bar--remove-room' delete `elneo-room-bar--row-lines'
-       ;; lines to rewrite or drop a row, so a preview-less row must still
-       ;; carry an (empty) second line — a one-line row here would make the
-       ;; next in-place update eat the following room's name line, stomp its
-       ;; marker and make rows vanish from the bar.
-       (format "%s\n%s" name-line
-               (if (and preview (> (length preview) 0))
-                   (propertize (concat "  " (funcall preview-text preview))
-                               'face 'elneo-room-bar-preview)
-                 "")))
-      (_ (if (and preview (> (length preview) 0))
-             (format "%s %s" name-line (funcall preview-text preview))
-           name-line)))))
+  (if (eq elneo-room-bar--state 'rail)
+      (elneo-room-bar--rail-text room)
+    (let* (;Anon mode fakes a render copy (name, preview); the registry
+           ;; record and the row properties stay raw.
+           (room (if elneo-anon-mode (elneo-anon--room room) room))
+           (unread (plist-get room :unread))
+           (highlights (plist-get room :highlights))
+           (name (truncate-string-to-width
+                  (or (elneo-room-bar--flatten-newlines
+                       (plist-get room :display-name))
+                      "?")
+                  elneo-room-bar-name-width nil nil "…"))
+           (preview (elneo-room-bar--flatten-newlines
+                     (plist-get room :preview)))
+           (prefix
+            (concat
+             (elneo-room-bar--avatar-prefix room)
+             (elneo-room-bar--account-prefix room)
+             (elneo-room-bar--dm-prefix room)
+             (elneo-room-bar--space-prefix room)
+             (elneo-room-bar--upgrade-prefix room)
+             (elneo-room-bar--muted-prefix room)
+             ;; The invite glyph shows only in `inline' mode — under the
+             ;; Invites section header the row is already unambiguous.
+             (when (and (elneo-room-bar--invite-p room)
+                        (eq elneo-room-invite-display 'inline))
+               elneo-room-bar-invite-glyph)
+             (cond
+              ((> highlights 0) (format "!%d " highlights))
+              ((> unread 0) (format "%d " unread))
+              (t ""))))
+           (name-line (format "%s%s" prefix name))
+           (preview-text
+            (lambda (p)
+              (truncate-string-to-width
+               p
+               (if (eq elneo-room-bar-preview-style 'below)
+                   ;; The second line has the whole bar width to itself.
+                   (max 10 (- elneo-room-bar-width 4))
+                 elneo-room-bar-preview-length)
+               nil nil "…"))))
+      (pcase elneo-room-bar-preview-style
+        ('none name-line)
+        ('below
+         ;; Always exactly two lines: `elneo-room-bar--put-row' and
+         ;; `elneo-room-bar--remove-room' delete `elneo-room-bar--row-lines'
+         ;; lines to rewrite or drop a row, so a preview-less row must still
+         ;; carry an (empty) second line — a one-line row here would make the
+         ;; next in-place update eat the following room's name line, stomp its
+         ;; marker and make rows vanish from the bar.
+         (format "%s\n%s" name-line
+                 (if (and preview (> (length preview) 0))
+                     (propertize (concat "  " (funcall preview-text preview))
+                                 'face 'elneo-room-bar-preview)
+                   "")))
+        (_ (if (and preview (> (length preview) 0))
+               (format "%s %s" name-line (funcall preview-text preview))
+             name-line))))))
+
+(defun elneo-room-bar--rail-text (room)
+  "The rail row for ROOM: the avatar initial, then the unread badge.
+No names, previews or markers — everything about the room is a
+wide-bar expand away (`elneo-room-bar-toggle-state').  The unread
+face from `elneo-room-bar--put-row' still covers the whole row,
+so unread rooms stay spottable at rail width."
+  (let* ((room (if elneo-anon-mode (elneo-anon--room room) room))
+         (unread (or (plist-get room :unread) 0))
+         (highlights (or (plist-get room :highlights) 0)))
+    (concat (elneo-room-bar--avatar-initial room)
+            (cond
+             ((> highlights 0) (format "!%d" highlights))
+             ((> unread 0) (format "%d" unread))
+             (t "")))))
 
 (defun elneo-room-bar--tag (profile &optional full)
   "Account tag for PROFILE; with FULL, the label in full.
@@ -928,49 +1031,63 @@ row group tracking) to hold on to across re-renders."
             (rooms (elneo-room-bar--visible-rooms)))
         (erase-buffer)
         (clrhash elneo-room-bar--markers)
-        (elneo-room-bar--insert-controls)
-        (insert "\n")
-        ;; The Invites section rides on top of either view when invites
-        ;; are configured to show together (see
-        ;; `elneo-room-invite-display'): a pseudo-key header like the
-        ;; grouped-view account headers, then one dimmed row per invite.
-        (when-let* ((invites (elneo-room-bar--invites)))
-          (elneo-room-bar--insert-section (cons :invites :section)
-                                          (format "Invites (%d)" (length invites)))
-          (dolist (invite invites)
-            (elneo-room-bar--put-row invite)))
-        (if elneo-room-bar-grouped
-            (dolist (profile (elneo-room-bar--account-list))
-              (let ((section (cl-remove-if-not
-                              (lambda (room)
-                                (equal (plist-get room :profile) profile))
-                              rooms)))
-                (when section
-                  (let* ((folded (gethash profile
-                                          elneo-room-bar--folded-accounts))
-                         (unread (apply #'+ (mapcar
-                                             (lambda (room)
-                                               (or (plist-get room :unread) 0))
-                                             section)))
-                         (label
-                          (concat (if folded "▸ " "▾ ")
-                                  (elneo-room-bar--tag profile t)
-                                  (when folded
-                                    (format " (%d room%s%s)"
-                                            (length section)
-                                            (if (= 1 (length section)) "" "s")
-                                            (if (> unread 0)
-                                                (format ", %d unread" unread)
-                                              ""))))))
-                    (elneo-room-bar--insert-section (cons profile :section)
-                                                    label
-                                                    'elneo-room-bar-account profile)
-                    (unless folded
-                      (dolist (room section)
-                        (elneo-room-bar--put-row room))))))))
-        (unless elneo-room-bar-grouped
-          (dolist (room rooms)
-            (elneo-room-bar--put-row room)))
+        (if (eq elneo-room-bar--state 'rail)
+            ;; Rail: the expand handle, then flat rows — controls,
+            ;; section headers and daemon chips cannot fit a rail
+            ;; and are wide-bar only; every setting they expose stays
+            ;; reachable from the transient menu (`m').
+            (progn
+              (insert-text-button
+               (propertize "»" 'face 'elneo-room-bar-header)
+               'help-echo "w: expand the room bar"
+               'action (lambda (_) (elneo-room-bar-toggle-state)))
+              (insert "\n")
+              (dolist (room (append (elneo-room-bar--invites) rooms))
+                (elneo-room-bar--put-row room)))
+          (elneo-room-bar--insert-controls)
+          (insert "\n")
+          ;; The Invites section rides on top of either view when invites
+          ;; are configured to show together (see
+          ;; `elneo-room-invite-display'): a pseudo-key header like the
+          ;; grouped-view account headers, then one dimmed row per invite.
+          (when-let* ((invites (elneo-room-bar--invites)))
+            (elneo-room-bar--insert-section (cons :invites :section)
+                                            (format "Invites (%d)" (length invites)))
+            (dolist (invite invites)
+              (elneo-room-bar--put-row invite)))
+          (if elneo-room-bar-grouped
+              (dolist (profile (elneo-room-bar--account-list))
+                (let ((section (cl-remove-if-not
+                                (lambda (room)
+                                  (equal (plist-get room :profile) profile))
+                                rooms)))
+                  (when section
+                    (let* ((folded (gethash profile
+                                            elneo-room-bar--folded-accounts))
+                           (unread (apply #'+
+                                          (mapcar
+                                           (lambda (room)
+                                             (or (plist-get room :unread) 0))
+                                           section)))
+                           (label
+                            (concat (if folded "▸ " "▾ ")
+                                    (elneo-room-bar--tag profile t)
+                                    (when folded
+                                      (format " (%d room%s%s)"
+                                              (length section)
+                                              (if (= 1 (length section)) "" "s")
+                                              (if (> unread 0)
+                                                  (format ", %d unread" unread)
+                                                ""))))))
+                      (elneo-room-bar--insert-section (cons profile :section)
+                                                      label
+                                                      'elneo-room-bar-account profile)
+                      (unless folded
+                        (dolist (room section)
+                          (elneo-room-bar--put-row room))))))))
+          (unless elneo-room-bar-grouped
+            (dolist (room rooms)
+              (elneo-room-bar--put-row room))))
         ;; Restore the view: point back on the room it was on, window top
         ;; back on its old top row (both fall back to the list start).
         (when window
@@ -1064,6 +1181,13 @@ row one is the instance filter (plus the search state), row two the
 sorting and display modes.  Everything here is also reachable from
 the `elneo-transient' menu (`m' in the bar)."
   (let ((inhibit-read-only t))
+    ;; Row one starts with the fold handle: a stable corner tap target
+    ;; (top-left), mirrored by the expand » at the top of the rail —
+    ;; both sides of the toggle are always one tap away.
+    (insert-text-button "[«]"
+                        'help-echo "w: fold the bar to the rail"
+                        'action (lambda (_) (elneo-room-bar-toggle-state)))
+    (insert " ")
     ;; Row one: instance filter buttons, then the search state.
     ;; The active filter carries the header face; the other controls
     ;; render as the ordinary blue button link type — an explicit
@@ -1427,11 +1551,14 @@ state persists for the next time grouped view comes on."
 
 (defun elneo-room-bar--mouse-1 (event)
   "Act on a mouse-1 click EVENT per `elneo-room-bar-click-action'.
-The click always moves point to the row it landed on; when the
-row is a room and the setting allows it, the room opens and
-carries the prefix pressed before the click — a universal prefix
-means: right where we are.  A click on a grouped-view account
-header folds or unfolds that section."
+The click always moves point to the row it landed on.  A button —
+the controls rows, the « and » handles — activates right away: a
+touch tap lands as mouse-1, and touch cannot use the mouse-2 the
+button machinery answers to.  When the row is a room and the
+setting allows it, the room opens and carries the prefix pressed
+before the click — a universal prefix means: right where we are.
+A click on a grouped-view account header folds or unfolds that
+section."
   (interactive "e")
   (let* ((posn (event-start event))
          (window (posn-window posn))
@@ -1442,6 +1569,9 @@ header folds or unfolds that section."
       (goto-char pt)
       (let ((room (elneo-room-bar--room-at-point)))
         (cond
+         ;; A button (controls, handles): activate on mouse-1.  Room
+         ;; rows carry no buttons, so this never shadows a room open.
+         ((button-at pt) (push-button (button-at pt)))
          ;; A room row: open it per the click-action setting.
          (room
           (when (or (eq elneo-room-bar-click-action 'open)

@@ -834,5 +834,62 @@
                       nil)))
       (kill-buffer buf)))
 
+  ;; Two shapes, one shared buffer: the rail (a collapsed bar for
+  ;; narrow frames and touch — avatar initial plus unread badge, one
+  ;; line per row) and the wide bar.  Row rendering and window width
+  ;; follow the bar buffer's shape; `nil' state (a bar created before
+  ;; the variable, or a fresh test buffer) is the wide bar.
+  (let ((buf (generate-new-buffer " *mx-bar-shape*")))
+    (unwind-protect
+        (let ((elneo-room-bar--buffer buf))
+          (mx-check "shape: fresh bar is the wide bar"
+                    (elneo-room-bar--width) 36)
+          (with-current-buffer buf
+            (setq elneo-room-bar--state 'rail))
+          (mx-check "shape: rail width"
+                    (elneo-room-bar--width) elneo-room-bar-rail-width)
+          (setq elneo-room-bar--state 'rail)
+          ;; A state binding outside the bar buffer still steers the
+          ;; row renderer when it runs here (as in these tests).
+          (mx-check "rail: quiet room renders the avatar initial only"
+                    (elneo-room-bar--row-text
+                     '(:profile "a" :room-id "!quiet" :display-name "Quiet room"
+                                :unread 0 :highlights 0))
+                    "Q ")
+          (mx-check "rail: unread rides the badge"
+                    (elneo-room-bar--row-text
+                     '(:profile "a" :room-id "!loud" :display-name "Loud room"
+                                :unread 5 :highlights 0))
+                    "L 5")
+          (mx-check "rail: highlights mark the badge"
+                    (elneo-room-bar--row-text
+                     '(:profile "a" :room-id "!ping" :display-name "Ping room"
+                                :unread 1 :highlights 2))
+                    "P !2")
+          (let ((elneo-room-bar-preview-style 'below))
+            (mx-check "wide: second preview line still two lines"
+                      (let ((elneo-room-bar--state nil))
+                        (elneo-room-bar--row-lines))
+                      2)
+            (mx-check "rail: always one line"
+                      (elneo-room-bar--row-lines)
+                      1)))
+      (kill-buffer buf)))
+
+  ;; Resting state: what a freshly created bar starts as.  Pinned
+  ;; values verbatim; `auto' derives from the frame (stubbed: no real
+  ;; frames in batch).
+  (let ((elneo-room-bar-resting-state 'rail))
+    (mx-check "resting: rail pinned" (elneo-room-bar--resting-state) 'rail))
+  (let ((elneo-room-bar-resting-state 'wide))
+    (mx-check "resting: wide pinned" (elneo-room-bar--resting-state) 'wide))
+  (let ((elneo-room-bar-resting-state 'auto))
+    (cl-letf (((symbol-function 'frame-width) (lambda () 60)))
+      (mx-check "resting: auto, narrow frame -> rail"
+                (elneo-room-bar--resting-state) 'rail))
+    (cl-letf (((symbol-function 'frame-width) (lambda () 200)))
+      (mx-check "resting: auto, wide frame -> wide"
+                (elneo-room-bar--resting-state) 'wide)))
+
   (message "results: %d passed, %d failed" pass fail)
   (kill-emacs (if (zerop fail) 0 1)))
