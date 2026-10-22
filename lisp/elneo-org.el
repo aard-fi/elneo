@@ -9,7 +9,8 @@
 ;;   elneo-user:profile/@user:server   — start or open the direct chat
 ;;
 ;; Storing (C-c l) inside an elneo room buffer yields the event link
-;; when point sits on a message line, the room link otherwise.  A
+;; when point sits on a message (any of its lines), the room link
+;; otherwise.  A
 ;; person link stores through `elneo-org-store-user-link', which
 ;; completes over the current room's roster.  `org-capture' picks all
 ;; of these up through the stored link like any other org link.
@@ -20,7 +21,7 @@
 (declare-function elneo-room--open "elneo-room" (room &optional stay-put))
 (declare-function elneo-room-jump-to-event "elneo-room"
                   (profile room-id event-id &optional stay-put))
-(declare-function elneo-room--event-id-at "elneo-room" (pos))
+(declare-function elneo-room--event-id-at-point "elneo-room" ())
 (declare-function elneo-room--roster-entries "elneo-room" (&optional keep-own))
 (declare-function elneo-start-dm "elneo-room" (profile user-id))
 (declare-function elneo-server-live-p "elneo-server" (profile))
@@ -78,11 +79,9 @@ not the old hook variable."
   (when (derived-mode-p 'elneo-room-mode)
     (let* ((profile elneo-room--profile)
            (room-id elneo-room--room-id)
-           ;; Point on the image glyph one past the line still counts
-           ;; as "on the message", like the media commands.
-           (event-id (or (elneo-room--event-id-at (point))
-                         (and (> (point) (point-min))
-                              (elneo-room--event-id-at (1- (point))))))
+           ;; Any line of a message counts as "on it", the way the
+           ;; room's point commands read the cursor.
+           (event-id (elneo-room--event-id-at-point))
            (seen (and event-id (gethash event-id elneo-room--seen))))
       (if seen
           (org-link-store-props

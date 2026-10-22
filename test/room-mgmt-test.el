@@ -48,6 +48,56 @@
                         (list :user-id "@me:example.org" :name "Me")))
       buf)))
 
+(defun mx--msg-room ()
+  "A backfilled room buffer with two message blocks, real layout.
+Block one is a two-line body (the event id on its last line only,
+`elneo-room-msg-block' over the whole block); block two a reply
+whose name line carries the quoted parent.  The point-key tests
+below read the cursor on every line of it."
+  (let ((buf (generate-new-buffer " *mx-mgmt-msg-room*"))
+        (beg) (quote-beg))
+    (with-current-buffer buf
+      (elneo-room-mode)
+      (setq-local elneo-room--profile "mxtest")
+      (setq-local elneo-room--room-id "!room")
+      (setq-local elneo-room--seen (make-hash-table :test 'equal))
+      (setq-local elneo--rooms (make-hash-table :test 'equal))
+      (puthash (cons "mxtest" "!room")
+               (list :profile "mxtest" :room-id "!room"
+                     :display-name "Ops")
+               elneo--rooms)
+      (setq-local elneo-room--backfilled t)
+      (insert "\n\n")
+      (setq beg (point))
+      (insert "Alice: one\ntwo\n")
+      (put-text-property beg (1- (point))
+                         'elneo-room-msg-block "$a1")
+      (save-excursion
+        (goto-char beg)
+        (forward-line 1)
+        (put-text-property (line-beginning-position) (line-end-position)
+                           'elneo-room-event-id "$a1"))
+      (puthash "$a1" (list :sender "@alice:x" :sender-name "Alice"
+                           :body "one\ntwo" :ts 1)
+               elneo-room--seen)
+      (setq beg (point))
+      (insert "Bob: ")
+      (setq quote-beg (point))
+      (insert "↳ Alice: one")
+      (put-text-property quote-beg (point) 'elneo-room-quote t)
+      (insert "\n     a reply\n")
+      (put-text-property beg (1- (point))
+                         'elneo-room-msg-block "$b1")
+      (save-excursion
+        (goto-char beg)
+        (forward-line 1)
+        (put-text-property (line-beginning-position) (line-end-position)
+                           'elneo-room-event-id "$b1"))
+      (puthash "$b1" (list :sender "@bob:example.org" :sender-name "Bob"
+                          :body "a reply" :ts 2)
+               elneo-room--seen)
+      buf)))
+
 (defun mx--settings-bools (room buf labels)
   "Which of LABELS render as buttons for ROOM, with room buffer BUF.
 Renders into a temp buffer with `standard-output' bound the way the
@@ -1479,6 +1529,60 @@ The same binding shape the `C-c ?' help window gives the render."
           (mx-check "overview: receipts come after the notifications row"
                     (> (string-search "Read by:" text)
                        (string-search "Notifications:" text)) t)))
+
+  ;; --- the point keys read the cursor through the shared resolver ---
+  ;; Only a block's last line carries the event id (the layout note in
+  ;; `elneo-room--append-messages'); the point commands must still
+  ;; answer on any line of a message — except a quote line, which
+  ;; stays the parent's ground.
+
+  (let ((room-buf (mx--msg-room)))
+    (with-current-buffer room-buf
+      ;; The body from a line above the body's last.
+      (goto-char (point-min))
+      (search-forward "one")
+      (let ((kill-ring nil) (kill-ring-yank-pointer nil))
+        (elneo-room--c)
+        (mx-check "point keys: c copies the text from a body's upper line"
+                  (car kill-ring) "one\ntwo"))
+      ;; One char past the last line is still on the message.
+      (goto-char (point-min))
+      (search-forward "two")
+      (let ((kill-ring nil) (kill-ring-yank-pointer nil))
+        (elneo-room--c)
+        (mx-check "point keys: c copies one char past the line"
+                  (car kill-ring) "one\ntwo"))
+      ;; The permalink from a reply's name line.
+      (goto-char (point-min))
+      (search-forward "Bob")
+      (let ((kill-ring nil) (kill-ring-yank-pointer nil))
+        (elneo-room--l)
+        (mx-check "point keys: l builds the permalink from the name line"
+                  (and (string-search "https://matrix.to/#/%21room/%24b1"
+                                      (car kill-ring))
+                       t)
+                  t))
+      ;; The same resolution names the message for d's own-gate — a
+      ;; null resolution would have said "No message at point".
+      (goto-char (point-min))
+      (search-forward "Bob")
+      (mx-check "point keys: d names the reply from its name line"
+                (condition-case err (elneo-room--d)
+                  (user-error (error-message-string err)) (error :blew-up))
+                "Only your own messages can be deleted")
+      ;; A quote line resolves to nothing.
+      (goto-char (point-min))
+      (search-forward "↳")
+      (mx-check "point keys: a quote line refuses with no message"
+                (condition-case err (elneo-room--c)
+                  (user-error (error-message-string err)) (error :blew-up))
+                "No message at point")
+      ;; A true gap (the blank lines above the first block) too.
+      (goto-char (point-min))
+      (mx-check "point keys: a blank line refuses with no message"
+                (condition-case err (elneo-room--c)
+                  (user-error (error-message-string err)) (error :blew-up))
+                "No message at point")))
 
   (message "%d ok, %d failed" pass fail)
   (when (> fail 0) (kill-emacs 1)))

@@ -52,58 +52,6 @@
                 (_      'default))))
     (propertize text 'face face)))
 
-(defun elneo-inspect-event ()
-  "Display elneo event properties in a floating popup that dynamically fits the longest line."
-  (interactive)
-  (let* ((pos (point))
-         (id (elneo-room--event-id-at pos))
-         (prev (and (> pos (point-min)) (elneo-room--event-id-at (1- pos))))
-         (raw (get-text-property pos 'elneo-room-event-id))
-         (quote (get-text-property pos 'elneo-room-quote))
-         (seen (when id (gethash id elneo-room--seen)))
-         (pop-buf " *elneo-popup-buffer*"))
-
-    ;; Populate the buffer
-    (with-current-buffer (get-buffer-create pop-buf)
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        ;; Explicitly turn off visual line wrapping in the popup frame canvas
-        (setq-local truncate-lines t)
-        (insert (elneo--colorize "Event ID: " :key)   (format "%s\n" id)
-                (elneo--colorize "Prev ID:  " :var)   (format "%s\n" prev)
-                (elneo--colorize "Raw Prop: " :str)   (format "%s\n" raw)
-                (elneo--colorize "Quote:    " :doc)   (format "%s\n" quote)
-                (elneo--colorize "Seen:     " :const) (format "%s" seen))))
-
-    ;; Render with dynamic width calculation
-    (if (fboundp 'posframe-show)
-        (posframe-show pop-buf
-                       :position pos
-                       :timeout 5
-                       ;; Dynamic Fit Strategy
-                       :width nil   ; Setting to nil lets it auto-fit the buffer content
-                       :height nil  ; Setting to nil lets it auto-fit the number of lines
-                       :min-width 60   ; Generous minimum width starting line
-                       :max-width 120  ; Prevents runaway long strings from going off screen
-                       :min-height 5
-                       ;; Layout Padding & Background
-                       :background-color (face-attribute 'tooltip :background nil t)
-                       :foreground-color (face-attribute 'tooltip :foreground nil t)
-                       :internal-border-width 3
-                       :internal-border-color "gray50"
-                       :left-fringe 12
-                       :right-fringe 12
-                       ;; Window manager hints
-                       :override-parameters '((parent-frame . nil)
-                                              (undecorated . t)
-                                              (visibility . nil)
-                                              (keep-ratio . nil)
-                                              (skip-taskbar . t)
-                                              (no-accept-focus . t)))
-      ;; Fallback to messages
-      (with-current-buffer pop-buf
-        (message "%s" (buffer-string))))))
-
 ;;;###autoload
 (defun elneo-reload ()
   "Reload the elneo-client package from its source directory.

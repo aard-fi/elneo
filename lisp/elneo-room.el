@@ -433,6 +433,60 @@ parent that is not loaded yet."
 (defvar elneo-room--buffers (make-hash-table :test 'equal)
   "Hash mapping (PROFILE . ROOM-ID) to the room's buffer.")
 
+;; Debug helpers
+(defun elneo-room-inspect-event ()
+  "Display elneo event properties in a dynamically sized floating popup"
+  (interactive)
+  (let* ((pos (point))
+         (id (elneo-room--event-id-at-point))
+         (prev (and (> pos (point-min)) (elneo-room--event-id-at (1- pos))))
+         (raw (get-text-property pos 'elneo-room-event-id))
+         (quote (get-text-property pos 'elneo-room-quote))
+         (seen (when id (gethash id elneo-room--seen)))
+         (pop-buf " *elneo-popup-buffer*"))
+
+    ;; Populate the buffer
+    (with-current-buffer (get-buffer-create pop-buf)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        ;; Explicitly turn off visual line wrapping in the popup frame canvas
+        (setq-local truncate-lines t)
+        (insert (elneo--colorize "Event ID: " :key)   (format "%s\n" id)
+                (elneo--colorize "Prev ID:  " :var)   (format "%s\n" prev)
+                (elneo--colorize "Raw Prop: " :str)   (format "%s\n" raw)
+                (elneo--colorize "Quote:    " :doc)   (format "%s\n" quote)
+                (elneo--colorize "Seen:     " :const) (format "%s" seen))))
+
+    ;; Render with dynamic width calculation
+    (if (fboundp 'posframe-show)
+        (posframe-show pop-buf
+                       :position pos
+                       :timeout 5
+                       ;; Dynamic Fit Strategy
+                       :width nil   ; Setting to nil lets it auto-fit the buffer content
+                       :height nil  ; Setting to nil lets it auto-fit the number of lines
+                       :min-width 60   ; Generous minimum width starting line
+                       :max-width 120  ; Prevents runaway long strings from going off screen
+                       :min-height 5
+                       ;; Layout Padding & Background
+                       :background-color (face-attribute 'tooltip :background nil t)
+                       :foreground-color (face-attribute 'tooltip :foreground nil t)
+                       :internal-border-width 3
+                       :internal-border-color "gray50"
+                       :left-fringe 12
+                       :right-fringe 12
+                       ;; Window manager hints
+                       :override-parameters '((parent-frame . nil)
+                                              (undecorated . t)
+                                              (visibility . nil)
+                                              (keep-ratio . nil)
+                                              (skip-taskbar . t)
+                                              (no-accept-focus . t)))
+      ;; Fallback to messages
+      (with-current-buffer pop-buf
+        (message "%s" (buffer-string))))))
+
+
 ;;; Window selection
 
 (defun elneo-room--main-window (&optional frame)
@@ -2699,7 +2753,7 @@ link (`org-store-link') stays local."
   "Copy the message at point's plain text to the kill ring.
 The body as stored (:body) — no display decorations; the URL at
 point copies with `w' when one link is all you need."
-  (let* ((id (elneo-room--event-id-at (point)))
+  (let* ((id (elneo-room--event-id-at-point))
          (msg (and id (gethash id elneo-room--seen))))
     (if (and msg (not (elneo-room--unsent-p msg)))
         (elneo-room--matrix-to-copier (plist-get msg :body) "text")
@@ -2710,7 +2764,7 @@ point copies with `w' when one link is all you need."
 A https://matrix.to URL (canonical alias or room id + event id)
 other Matrix clients open.  Redacted messages keep a usable link —
 the target event id is on the server either way."
-  (let* ((id (elneo-room--event-id-at (point)))
+  (let* ((id (elneo-room--event-id-at-point))
          (msg (and id (gethash id elneo-room--seen))))
     (cond
      ((null id) (user-error "No message at point"))
@@ -2738,7 +2792,7 @@ A thread with no known replies still opens: its buffer pins the
 root and fetches what the server has.  Lazy require, like the
 image viewer: elneo-thread needs this file's buffer-locals."
   (interactive)
-  (let ((id (elneo-room--event-id-at (point))))
+  (let ((id (elneo-room--event-id-at-point)))
     (unless id (user-error "No message at point"))
     (let ((msg (gethash id elneo-room--seen)))
       ;; Same gate as r/a/e/d: a ⏱/✗ id names nothing on the server —
@@ -2791,7 +2845,7 @@ image viewer: elneo-thread needs this file's buffer-locals."
 The next draft send carries the reply relation (first text segment
 of the draft); C-c C-k cancels.  A reply to a message that lives
 in a thread sends INTO that thread (like Element)."
-  (let* ((id (elneo-room--event-id-at (point)))
+  (let* ((id (elneo-room--event-id-at-point))
          (msg (and id (gethash id elneo-room--seen))))
     (cond
      ((null msg) (user-error "No message at point"))
@@ -2825,7 +2879,7 @@ in a thread sends INTO that thread (like Element)."
 Offers the keys of `elneo-room-reaction-emoji-options' plus the
 reactions already on the message, with free-form input accepted.
 Reacting with a key you already used toggles it off."
-  (let* ((id (elneo-room--event-id-at (point)))
+  (let* ((id (elneo-room--event-id-at-point))
          (entries (and id (hash-table-p elneo-room--reactions)
                        (gethash id elneo-room--reactions)))
          ;; All keys on the message, and the ones we used (toggling off).
@@ -2858,7 +2912,7 @@ Reacting with a key you already used toggles it off."
   "Delete (redact) your own message at point.
 Asks for confirmation.  The display update arrives via the daemon's
 redaction announcement, like any remote redaction."
-  (let* ((id (elneo-room--event-id-at (point)))
+  (let* ((id (elneo-room--event-id-at-point))
          (msg (and id (gethash id elneo-room--seen))))
     (cond
      ((null msg) (user-error "No message at point"))
@@ -2878,7 +2932,7 @@ The daemon carries `m.room.pinned_events' behind the room's
 pinning power level (protocol 22); the [pinned] mark renders when
 the state echo re-announces the summary — nothing flips before the
 server agrees.  Redacted messages cannot be pinned."
-  (let* ((id (elneo-room--event-id-at (point)))
+  (let* ((id (elneo-room--event-id-at-point))
          (msg (and id (gethash id elneo-room--seen))))
     (if (and msg (not (elneo-room--unsent-p msg)))
         (elneo-send-pin
@@ -2896,7 +2950,7 @@ The current body lands in the draft area; RET sends the edit
 (m.replace), C-c C-k cancels.  Only text messages can be edited —
 media is deleted with `d' and re-sent instead.  Starting an edit
 cancels a pending reply, and vice versa."
-  (let* ((id (elneo-room--event-id-at (point)))
+  (let* ((id (elneo-room--event-id-at-point))
          (msg (and id (gethash id elneo-room--seen))))
     (cond
      ((null msg) (user-error "No message at point"))
@@ -2951,7 +3005,7 @@ defkey command."
       ;; message at point still moves to an earlier one; with no
       ;; anchor (draft area or nothing at point) everything counts.
       (when-let* ((anchor (or elneo-room--edit-to
-                              (elneo-room--event-id-at (point)))))
+                              (elneo-room--event-id-at-point))))
         (setq newest-first
               (cdr (or (member anchor newest-first)
                        newest-first))))
@@ -2979,7 +3033,7 @@ defkey command."
 
 (defun elneo-room--poll-at-point ()
   "The plist (:event-id :poll) of the poll at point, or nil."
-  (let* ((id (elneo-room--event-id-at (point)))
+  (let* ((id (elneo-room--event-id-at-point))
          (msg (and id (gethash id elneo-room--seen))))
     (when (and msg (plist-get msg :poll))
       (cons id msg))))
@@ -4323,7 +4377,7 @@ The body — and the reply relation, when it was a reply — go out
 again as a fresh send with its own provisional echo.  Nothing is
 edited or queued: the previous attempt is over, this is a new
 message to the server."
-  (let* ((id (elneo-room--event-id-at (point)))
+  (let* ((id (elneo-room--event-id-at-point))
          (msg (and id (gethash id elneo-room--seen))))
     (cond
      ((null msg) (user-error "No message at point"))
@@ -4359,7 +4413,7 @@ message to the server."
 Removes the block from the buffer; nothing ever reached the
 server.  Discarding a pending message does not stop the send — the
 sync echo renders it again when the server has it."
-  (let* ((id (elneo-room--event-id-at (point)))
+  (let* ((id (elneo-room--event-id-at-point))
          (msg (and id (gethash id elneo-room--seen))))
     (cond
      ((null msg) (user-error "No message at point"))
@@ -5624,7 +5678,7 @@ on-disk redaction log, which only exists while
 `elneo-room-redaction-history' is on.  Revealing is strictly local;
 nothing is re-sent to the server."
   (interactive)
-  (let* ((id (elneo-room--event-id-at (point)))
+  (let* ((id (elneo-room--event-id-at-point))
          (msg (and id (gethash id elneo-room--seen))))
     (cond
      ((null msg) (user-error "No message at point"))
@@ -5678,7 +5732,7 @@ nothing is re-sent to the server."
   "Pop up the known versions of the message at point, oldest first.
 Only versions that arrived as live edits in this buffer are
 remembered (plus the currently rendered one)."
-  (let* ((id (elneo-room--event-id-at (point)))
+  (let* ((id (elneo-room--event-id-at-point))
          (msg (and id (gethash id elneo-room--seen))))
     (cond
      ((null msg) (user-error "No message at point"))
@@ -6939,6 +6993,31 @@ under the cursor."
   (unless (get-text-property pos 'elneo-room-quote)
     (get-text-property pos 'elneo-room-event-id)))
 
+(defun elneo-room--event-id-enclosing (pos)
+  "The event id of the message block enclosing POS, or nil.
+Only a block's last line carries the event id (the layout note in
+`elneo-room--append-messages'); this reads the whole-block marker
+`elneo-room-msg-block' instead, so any line of a message answers.
+A quote line never resolves — the parent stays the parent."
+  (let ((id (get-text-property pos 'elneo-room-msg-block)))
+    (and id
+         (not (get-text-property pos 'elneo-room-quote))
+         (gethash id elneo-room--seen)
+         id)))
+
+(defun elneo-room--event-id-at-point ()
+  "The event id of the message the cursor is on, or nil.
+The cursor's own spot first (`elneo-room--event-id-at'), one
+character back (a cursor right after a message counts as on it),
+then the enclosing block — so any line of a multi-line message
+answers.  Point commands read the cursor through this; the
+read-marker stays with the strict walker, where a cursor inside a
+message must not resolve to it, or reading it would mark it read."
+  (or (elneo-room--event-id-at (point))
+      (and (> (point) (point-min))
+           (elneo-room--event-id-at (1- (point))))
+      (elneo-room--event-id-enclosing (point))))
+
 (defun elneo-room--event-before-point ()
   "Event id of the newest event entirely above point, or nil.
 An event the cursor still sits inside does not count as read."
@@ -7399,7 +7478,7 @@ successor named."
   ;; A replaced target would bounce the forward off the server; say
   ;; so before anything is staged.
   (elneo--room-refuse-replaced room)
-  (let* ((id (elneo-room--event-id-at (point)))
+  (let* ((id (elneo-room--event-id-at-point))
          (msg (and id (gethash id elneo-room--seen))))
     (if (null msg)
         (user-error "No message at point")

@@ -16,13 +16,16 @@
 (require 'elneo-room)
 
 (defun mx--room-buffer ()
-  "A room buffer with a marked message line, a roster, a room record.
-The message line carries the `elneo-room-event-id' text property the
-way renders put it on (no synthetic quote id — that branch is the
-media pipeline's).  The room record lands in a fresh buffer-local
-`elneo--rooms' so the label lookup answers."
+  "A room buffer with marked message blocks, a roster, a room record.
+The blocks carry the real property layout (see
+`elneo-room--append-messages'): `elneo-room-msg-block' over each
+block from its first line, the event id on the last line only —
+the lines above it are the deliberate gaps the read-marker relies
+on — and a reply's quote refused the way the walkers refuse it.
+The room record lands in a fresh buffer-local `elneo--rooms' so
+the label lookup answers."
   (let ((buf (generate-new-buffer " *mx-org-room*"))
-        (beg))
+        (beg) (quote-beg))
     (with-current-buffer buf
       (elneo-room-mode)
       (setq-local elneo-room--profile "mxtest")
@@ -38,15 +41,38 @@ media pipeline's).  The room record lands in a fresh buffer-local
                      :display-name "Ops")
                elneo--rooms)
       (insert "\n\n")
+      ;; Block one: a two-line body.  The event id sits on its LAST
+      ;; line only; the first line reads as a gap to the walkers.
       (setq beg (point))
       (insert "Alice: hello\nworld\n")
-      ;; The id reaches through the line's trailing newline, the way
-      ;; the one-past fallback reads it.
-      (put-text-property beg (point)
-                         'elneo-room-event-id "$alice1")
+      (put-text-property beg (1- (point))
+                         'elneo-room-msg-block "$alice1")
+      (save-excursion
+        (goto-char beg)
+        (forward-line 1)
+        (put-text-property (line-beginning-position) (line-end-position)
+                           'elneo-room-event-id "$alice1"))
       ;; The seen record answers for snippet and sender.
       (puthash "$alice1" (list :sender "@alice:x" :sender-name "Alice"
                                :body "hello\nworld\nlast line" :ts 1)
+               elneo-room--seen)
+      ;; Block two: a reply — the name line quotes the parent, then
+      ;; the indented body line.
+      (setq beg (point))
+      (insert "Bob: ")
+      (setq quote-beg (point))
+      (insert "↳ Alice: hi")
+      (put-text-property quote-beg (point) 'elneo-room-quote t)
+      (insert "\n     a reply\n")
+      (put-text-property beg (1- (point))
+                         'elneo-room-msg-block "$bob1")
+      (save-excursion
+        (goto-char beg)
+        (forward-line 1)
+        (put-text-property (line-beginning-position) (line-end-position)
+                           'elneo-room-event-id "$bob1"))
+      (puthash "$bob1" (list :sender "@bob:example.org" :sender-name "Bob"
+                             :body "a reply" :ts 2)
                elneo-room--seen)
       buf)))
 
@@ -159,6 +185,14 @@ media pipeline's).  The room record lands in a fresh buffer-local
               (plist-get org-store-link-plist :link))
             "elneo-event:mxtest/!room:hs.example/$alice1")
 
+  (mx-check "store: an upper line of a multi-line body still names the event"
+            (with-current-buffer (mx--room-buffer)
+              (goto-char (point-min))
+              (search-forward "Alice")
+              (org-store-link nil nil)
+              (plist-get org-store-link-plist :link))
+            "elneo-event:mxtest/!room:hs.example/$alice1")
+
   (mx-check "store: the event description is sender + snippet"
             (with-current-buffer (mx--room-buffer)
               (goto-char (point-min))
@@ -169,10 +203,34 @@ media pipeline's).  The room record lands in a fresh buffer-local
 
   (mx-check "store: one past the line still counts as on the event"
             (with-current-buffer (mx--room-buffer)
-              (goto-char (point-max))
+              (goto-char (point-min))
+              (search-forward "world")
               (org-store-link nil nil)
               (plist-get org-store-link-plist :link))
             "elneo-event:mxtest/!room:hs.example/$alice1")
+
+  (mx-check "store: a reply's name line resolves to the reply"
+            (with-current-buffer (mx--room-buffer)
+              (goto-char (point-min))
+              (search-forward "Bob")
+              (org-store-link nil nil)
+              (plist-get org-store-link-plist :link))
+            "elneo-event:mxtest/!room:hs.example/$bob1")
+
+  (mx-check "store: a quote line still declines to the room"
+            (with-current-buffer (mx--room-buffer)
+              (goto-char (point-min))
+              (search-forward "↳")
+              (org-store-link nil nil)
+              (plist-get org-store-link-plist :link))
+            "elneo-room:mxtest/!room:hs.example")
+
+  (mx-check "store: the empty line past the last block stays the room link"
+            (with-current-buffer (mx--room-buffer)
+              (goto-char (point-max))
+              (org-store-link nil nil)
+              (plist-get org-store-link-plist :link))
+            "elneo-room:mxtest/!room:hs.example")
 
   (mx-check "store: elsewhere in the room, the room link"
             (with-current-buffer (mx--room-buffer)
