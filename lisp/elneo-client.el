@@ -2119,6 +2119,88 @@ sips is refused, since it cannot be told not to upsample."
               (message "Matrix: scaling %s failed — sending the original" name)
               (cons path nil)))))))))
 
+(defun elneo--convert-argv (backend in out)
+  "The full argv converting IN to a PNG at OUT via BACKEND.
+The receive-side counterpart of `elneo--scale-argv': no resizing,
+no auto-orient — just a format change, used when Emacs cannot
+display IN as-is.  Only the fallback arm of the display
+conversion reaches this: the built-in `image-convert' runs first
+and covers gm, ffmpeg and convert.  What it leaves is exactly
+what it does not know — sips on a stock macOS, ImageMagick 7's
+`magick' binary.  Every backend picks its output format from the
+target extension; the explicit pin under sips is redundant safety."
+  (cond ((eq backend 'magick) (list "magick" in out))
+        ((eq backend 'convert) (list "convert" in out))
+        ((eq backend 'gm) (list "gm" "convert" in out))
+        ((eq backend 'sips) (list "sips" "-s" "format" "png" in "--out" out))))
+
+(defvar elneo--image-conversions (make-hash-table :test #'equal)
+  "Converted PNG copies by source path, filled by `elneo--image-for-display'.
+The copies live in the system temp directory, so the OS reclaims
+whatever a long session leaves behind.  The table lasts only as
+long as the Emacs process — after a restart each image converts
+again, one tool run each.")
+
+(declare-function image-convert "image-converter"
+                  (image &optional image-format))
+
+(defun elneo--image-convert-builtin (path out)
+  "Convert PATH to a PNG at OUT via the built-in `image-converter'.
+That library (Emacs 28+) wraps gm, ffmpeg and convert, and — better
+than elneo's own probe — checks which formats the installed build
+really reads before committing to a backend.  `image-convert'
+answers with the PNG as image data, which lands in OUT; its own
+suffix-based gate (`image-convert-p') is deliberately skipped, as
+the daemon's cache files carry no extension.  Which backend was
+picked sits in `image-converter' after `image-converter-initialize'.
+Return OUT when it holds a displayable PNG; nil — no converter
+installed, or nothing readable came out — leaves OUT untouched,
+so the caller can fall back to the elneo backends."
+  (require 'image-converter)
+  (let ((coding-system-for-write 'no-conversion))
+    (condition-case nil
+        (let ((data (image-convert path)))
+          (and (stringp data)
+               (> (length data) 0)
+               (progn
+                 (write-region data nil out nil 'silent)
+                 (create-image out nil nil))))
+      (error nil))))
+
+(defun elneo--image-for-display (path)
+  "Return a file that displays PATH: PATH itself, or a converted copy.
+This Emacs cannot display every image it receives — a build
+without avif support, or a file whose declared name does not match
+its content.  When PATH is displayable it is returned unchanged.
+Otherwise a conversion to PNG is attempted in two steps: first the
+built-in `image-convert' (gm, ffmpeg, convert), then elneo's own
+backends, which cover what the built-in does not know — sips on a
+stock macOS, ImageMagick 7's `magick' binary.  A successful
+conversion is remembered per source path; a failed one is not, so
+installing a tool mid-session, or simply trying again, retries.
+nil means neither PATH nor any conversion can be displayed —
+callers should show a placeholder, never delete content they
+cannot replace."
+  (setq path (expand-file-name path))
+  (or (condition-case nil
+          (and (create-image path nil nil) path)
+        (error nil))
+      (gethash path elneo--image-conversions)
+      (let* ((out (make-temp-file "elneo-image-" nil ".png"))
+             (converted
+              (and (or (elneo--image-convert-builtin path out)
+                       (when-let* ((backend (elneo--scale-backend)))
+                         (elneo--scale-run
+                          (elneo--convert-argv backend path out))))
+                   (condition-case nil
+                       (create-image out nil nil)
+                     (error nil)))))
+        (if converted
+            (puthash path out elneo--image-conversions)
+          (when (file-exists-p out)
+            (delete-file out))
+          nil))))
+
 (defun elneo--upload-stage (path)
   "Return \(STAGED . CLEANUP): a local path the daemon can read for PATH.
 Local files pass through (expanded, no cleanup thunk).  A file
@@ -2558,10 +2640,13 @@ renders in many places and needs fetching once.")
   "Image spec for a downloaded avatar FILE, capped near COLS columns.
 nil when FILE is nil or this Emacs cannot display images (terminal
 frame, batch): callers fall back to the mxc string or the initial
-cell.  The bar's sender avatars and the avatar facts (room
-overview, account page) build their cells from this, so one
-download renders identically everywhere."
-  (when (and file (display-graphic-p))
+cell.  FILE goes through `elneo--image-for-display' first, so an
+avatar in a format Emacs cannot decode converts to a PNG instead
+of staying an initial forever.  The bar's sender avatars and the
+avatar facts (room-overview, account page) build their cells from
+this, so one download renders identically everywhere."
+  (when-let* ((file (and file (display-graphic-p)
+                         (elneo--image-for-display file))))
     (create-image
      file nil nil
      :max-height (default-font-height)

@@ -410,18 +410,35 @@ at selected)."
     (elneo-image--update-modeline)))
 
 (defun elneo-image--insert-file (file)
-  "Insert the full-size image FILE, fitted to the window."
+  "Insert the full-size image FILE, fitted to the window.
+When this Emacs cannot show FILE — an unsupported format such as
+avif, and no installed tool can convert it (`elneo--image-for-display'
+returns nil) — the buffer shows a note naming the file instead of a
+picture, and `o' opens it in an external viewer, which handles the
+formats Emacs does not.  `o' always opens FILE as downloaded, even
+when the picture on display is a converted copy."
   (let* ((fit (elneo-image--fit-size))
          (inhibit-read-only t)
-         (img (create-image file nil nil :ascent 100
-                            :max-width (car fit)
-                            :max-height (cdr fit))))
+         (display (elneo--image-for-display file))
+         (img (condition-case nil
+                  (when display
+                    (create-image display nil nil :ascent 100
+                                  :max-width (car fit)
+                                  :max-height (cdr fit)))
+                (error nil)))
+         (name (or (elneo-image--file-name
+                    (elneo-image--current-msg))
+                   "image")))
     (setq elneo-image--file file)
     (erase-buffer)
-    (insert-image img (or (elneo-image--file-name
-                           (elneo-image--current-msg))
-                          "image"))
-    (insert "\n")
+    (if img
+        (progn
+          (insert-image img name)
+          (insert "\n"))
+      (insert (propertize
+               (format "[this Emacs cannot display %s — o opens it externally]"
+                       name)
+               'face 'shadow)))
     (elneo-image--update-modeline)))
 
 (defun elneo-image--refresh ()

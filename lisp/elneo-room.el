@@ -7382,37 +7382,63 @@ what string event ids need."
 
 (defun elneo-room--put-image (beg end file event-id)
   "Replace BEG..END with the image stored at FILE.
-The alt text keeps EVENT-ID so the region stays findable, and the
-media properties of the replaced placeholder — otherwise `o' and
-RET on a displayed image lose track of the source and can no
-longer open the full file.  `elneo-room-media-thumb' is
-deliberately not kept: the inline-thumbnail scanner keys on it and
+The inserted text keeps EVENT-ID so the region stays findable, and
+keeps the media properties of the replaced placeholder — otherwise
+`o' and RET on a displayed image lose track of the source and can
+no longer open the full file.  `elneo-room-media-thumb' is
+deliberately dropped: the inline-thumbnail scanner keys on it and
 would re-fetch every image on each scroll pass.  A video's
-thumbnail gains the ▶ mark before the image (and a \"[video]\"
-alt, shown where images cannot render) — the user must still see
-it is a playable video, not an ordinary picture."
-  (let ((inhibit-read-only t)
-        (media (get-text-property beg 'elneo-room-media-data))
-        (name (get-text-property beg 'elneo-room-media-name))
-        (video (elneo-room--video-media-p
-                (get-text-property beg 'elneo-room-media-data)))
-        ;; FILE has no reliable extension (thumbs are cached
-        ;; extensionless), so let image.el sniff the type from content.
-        (img (create-image file nil nil :ascent 100
-                           :max-width 320 :max-height 240)))
+thumbnail gains the ▶ mark and a \"[video]\" alt text, so it still
+reads as playable, not as an ordinary picture.
+
+When this Emacs cannot display FILE — an unsupported format and no
+tool installed to convert it (`elneo--image-for-display' returns
+nil) — the placeholder becomes an \"[image: name]\" text tag
+instead of vanishing.  The tag keeps the media properties, so
+`o'/RET still open the original file in an external viewer, which
+shows the formats Emacs cannot; it too carries no
+`elneo-room-media-thumb', so the scanner does not re-fetch it on
+every scroll pass."
+  (let* ((media (get-text-property beg 'elneo-room-media-data))
+         (name (get-text-property beg 'elneo-room-media-name))
+         (video (elneo-room--video-media-p media))
+         ;; FILE has no reliable extension (thumbs are cached
+         ;; extensionless), so display type comes from content —
+         ;; with a conversion when this Emacs cannot display it.
+         (display (elneo--image-for-display file))
+         ;; An error from create-image (a corrupt file, say) counts
+         ;; as undisplayable here, before anything is deleted — the
+         ;; caller's error handler never faces a deleted placeholder.
+         (img (condition-case nil
+                  (when display
+                    (create-image display nil nil :ascent 100
+                                  :max-width 320 :max-height 240))
+                (error nil)))
+         (inhibit-read-only t))
     (save-excursion
       (delete-region beg end)
       (goto-char beg)
-      (when video
-        (insert (propertize "▶ " 'face 'elneo-room-video-play
-                            'read-only t)))
-      (insert-image img (propertize (if video "[video]" "[image]")
-                                    'elneo-room-event-id event-id
-                                    'elneo-room-media (when media t)
-                                    'elneo-room-media-data media
-                                    'elneo-room-media-name name
-                                    'read-only t))
-      (insert " "))))
+      (if img
+          (progn
+            (when video
+              (insert (propertize "▶ " 'face 'elneo-room-video-play
+                                  'read-only t)))
+            (insert-image img (propertize (if video "[video]" "[image]")
+                                          'elneo-room-event-id event-id
+                                          'elneo-room-media (when media t)
+                                          'elneo-room-media-data media
+                                          'elneo-room-media-name name
+                                          'read-only t))
+            (insert " "))
+        (let ((kind (if video "video" "image")))
+          (insert (propertize
+                   (if name (format "[%s: %s]" kind name)
+                     (format "[%s]" kind))
+                   'face 'shadow
+                   'elneo-room-media (when media t)
+                   'elneo-room-media-data media
+                   'elneo-room-media-name name
+                   'elneo-room-event-id event-id)))))))
 
 ;;; Downloaded files
 
@@ -7714,7 +7740,10 @@ the recolor happens even when the player fails to start."
 The file lands in the daemon's on-disk media cache (already-cached
 files open immediately) and is handed to
 `elneo-open-file-function'.  On an image placeholder this opens
-the full-size image, not just the inline thumbnail."
+the full-size image, not just the inline thumbnail.  The media
+alist rides along to the handler: pictures open through
+`elneo--image-for-display', so a format this Emacs cannot type
+arrives as a copy it can."
   (interactive)
   (let* ((hit (elneo-room--media-at-point))
          (media (cdr hit)))
@@ -7727,7 +7756,7 @@ the full-size image, not just the inline thumbnail."
         (elneo-download-media
          elneo-room--profile (alist-get 'source media) "file"
          (lambda (_profile event)
-           (elneo-room--on-media-file buffer name event))
+           (elneo-room--on-media-file buffer name event media))
          name)))))
 
 (defun elneo-room-save-media-at-point ()
@@ -7780,15 +7809,27 @@ NAME is the media's display name for the report in room BUFFER."
           (message "Matrix: could not download %s: %s"
                    name (elneo-server--error-string event)))))))
 
-(defun elneo-room--on-media-file (buffer name event)
-  "Open the `updateMediaFile' response EVENT for NAME in room BUFFER."
+(defun elneo-room--on-media-file (buffer name event &optional media)
+  "Open the `updateMediaFile' response EVENT for NAME in room BUFFER.
+MEDIA is the opened message's media alist when known.  Images go
+through `elneo--image-for-display': the downloaded file itself when
+Emacs can display it, otherwise a converted PNG copy — a downloaded
+image in a format Emacs cannot decode (an avif under the sender's
+.webp name, say) would otherwise land in `image-mode' as raw text.
+When no conversion succeeds the original file is still opened; an
+externally configured `elneo-open-file-function' may handle it.
+Non-image media opens as downloaded, untouched."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (let ((path (alist-get 'path event)))
         (if (and (alist-get '@ok event nil nil #'equal) path)
-            (progn
+            (let* ((mime (and media (alist-get 'mimetype media)))
+                   (open (if (and (stringp mime)
+                                  (string-prefix-p "image/" mime))
+                             (or (elneo--image-for-display path) path)
+                           path)))
               (message "Matrix: opening %s" name)
-              (funcall elneo-open-file-function path))
+              (funcall elneo-open-file-function open))
           (message "Matrix: could not download %s: %s"
                    name (elneo-server--error-string event)))))))
 
