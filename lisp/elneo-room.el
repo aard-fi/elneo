@@ -868,20 +868,19 @@ them the same way (tags into the draft, nothing sent until RET)."
   (when (fboundp 'flyspell-mode) (flyspell-mode -1))
   (when (boundp 'aard/flyspell-major-mode-blacklist)
     (cl-pushnew 'elneo-room-mode aard/flyspell-major-mode-blacklist))
-  ;; Drops: room buffers accept local files (attached into the draft);
-  ;; every other buffer — bar, minibuffer — keeps the default behavior
-  ;; (open the file).  `dnd.el' reads this buffer-local alist for the
-  ;; drop window's buffer (`dnd-handle-multiple-urls' runs the handler
-  ;; `with-selected-window').  The pattern must cover all the file URL
-  ;; shapes an OS hands over — `file:///path', `file:/path' (seen from
-  ;; macOS promised-file drags, e.g. screenshot thumbnails) and
-  ;; `file://localhost/path' — because anything dnd.el cannot assign a
-  ;; handler for is *inserted into the buffer as text* (its documented
-  ;; fallback), so a narrow pattern literally ships the raw URL into
-  ;; the draft.  Unmatched shapes stay in the handler: it decides per
-  ;; URL and always answers non-nil for file URLs, which again keeps
-  ;; the dnd-insert-text fallback from firing.
-  (setq-local dnd-protocol-alist '(("^file:" . elneo-room-dnd-receive))))
+  ;; Drops into a room buffer attach: local files directly, and
+  ;; images by URL — apps hand an image drag to Emacs as the
+  ;; image's URL, never as the bytes, so the URL handler fetches
+  ;; it.  The file pattern must cover every shape an OS hands over
+  ;; (`file:///path', `file:/path', `file://localhost/path'):
+  ;; whatever dnd.el cannot assign a handler is *typed into the
+  ;; buffer as text*, so a narrow pattern ships raw URLs into the
+  ;; draft.  Both handlers answer `private' for everything they
+  ;; match — a refused drop must never degenerate into a raw URL
+  ;; text message.
+  (setq-local dnd-protocol-alist
+              '(("^file:" . elneo-room-dnd-receive)
+                ("^https?:" . elneo-room-dnd-receive-url))))
 
 (defun elneo-room--invalidate-on-activate (profile)
   "Reset daemon-dependent history state of PROFILE's room buffers.
@@ -7866,9 +7865,7 @@ fallback), which is exactly how a dropped attachment ends up sent
 as a `file:/...' text message.  Drops while the room is not
 rendered yet are refused with a message."
   (if (not elneo-room--backfilled)
-      (progn
-        (message "Matrix: room not rendered yet — drop again once it is")
-        'private)                              ; swallow the urls either way
+      (elneo-room--dnd-refuse-unrendered)   ; swallow the urls either way
     (let ((paths nil))
       (dolist (url urls)
         (let* ((url (replace-regexp-in-string
@@ -7888,6 +7885,98 @@ rendered yet are refused with a message."
         ;; Consumed the urls either way: never let dnd.el type the raw
         ;; file URLs into the buffer.
         'private))))
+
+(defun elneo-room--dnd-refuse-unrendered ()
+  "Answer a drop into an unrendered room: message, and `private'."
+  (message "Matrix: room not rendered yet — drop again once it is")
+  'private)
+
+(put 'elneo-room-dnd-receive-url 'dnd-multiple-handler t)
+
+(defun elneo-room-dnd-receive-url (urls _action)
+  "Handle URLs dragged into the room buffer: attach images, draft links.
+Apps hand an image drag to Emacs as the image's URL, never as the
+bytes, so each URL is fetched and the outcome lands in the draft
+when the fetch answers: an image becomes an [image: temp file]
+tag — nothing goes out until RET; anything else — a dragged
+link, a page, a failed fetch — drops the URL itself in as
+text, so RET sends it as a link message.  Returns `private'
+so dnd.el does not type the raw URL into the draft on top."
+  (if (not elneo-room--backfilled)
+      (elneo-room--dnd-refuse-unrendered)
+    (dolist (url urls)
+      (elneo-room--drop-url url (current-buffer)))
+    'private))
+
+(defun elneo-room--drop-url (url room-buffer)
+  "Fetch dropped URL; attach its image in ROOM-BUFFER, else draft the link.
+Async: dnd.el has its `private' answer immediately, the result
+lands in the draft when the fetch finishes — and the callback
+runs in the fetch's process buffer, so ROOM-BUFFER rides the
+closure.  Progress goes to the debug buffer, not the minibuffer;
+the outcome message is the only line a drop puts on screen."
+  (elneo--debug-log "Matrix [%s] url drop: fetching %s"
+                    (buffer-local-value 'elneo-room--profile room-buffer)
+                    url)
+  (url-retrieve url
+                (lambda (status)
+                  (let ((buf (current-buffer))
+                        (err (plist-get status :error))
+                        (data (elneo-room--response-body)))
+                    (unwind-protect
+                        (if (and (not err) data (image-type-from-data data))
+                            (elneo-room--attach-image-data
+                             data (image-type-from-data data) url room-buffer)
+                          (elneo-room--drop-link url room-buffer))
+                      (when (buffer-live-p buf)
+                        (kill-buffer buf)))))))
+
+(defun elneo-room--response-body ()
+  "The body of the HTTP response in this `url-retrieve' buffer, or nil.
+Nil when no response arrived — connection refused and the like.
+Byte-safe unibyte: the sniff and the file write both read it."
+  (goto-char (point-min))
+  (when (re-search-forward "^\r?\n" nil t)
+    (encode-coding-string
+     (buffer-substring-no-properties (point) (point-max))
+     'binary)))
+
+(defun elneo-room--attach-image-data (data type url room-buffer)
+  "Write image DATA (sniffed TYPE, from URL) to a temp file; attach in ROOM-BUFFER.
+The temp name keeps the URL's basename — the tag shows it, and
+the send reads the upload's name and mime from the path at RET."
+  (let* ((ext (if (eq type 'jpeg) "jpg" (symbol-name type)))
+         (path (make-temp-file
+                (concat "elneo-drop-" (elneo-room--url-basename url))
+                nil (concat "." ext))))
+    (write-region data nil path nil 'quiet)
+    (with-current-buffer room-buffer
+      (elneo-room--insert-attach-tag path))
+    (elneo--debug-log "Matrix [%s] url drop: attached %s"
+                      (buffer-local-value 'elneo-room--profile room-buffer)
+                      (file-name-nondirectory path))
+    (message "Matrix: attached %s" (file-name-nondirectory path))))
+
+(defun elneo-room--url-basename (url)
+  "A temp-file-safe base name for URL's target, \"image\" when it has none."
+  (let ((base (file-name-base
+               (file-name-nondirectory
+                (replace-regexp-in-string "[?#].*\\'" "" url)))))
+    (if (string-empty-p base) "image" base)))
+
+(defun elneo-room--drop-link (url room-buffer)
+  "Insert dropped URL as draft text in ROOM-BUFFER.
+The no-image outcome: the link lands in the draft, RET sends it."
+  (with-current-buffer room-buffer
+    (save-excursion
+      (goto-char (point-max))
+      (when (> (length (string-trim (elneo-room--draft-text))) 0)
+        (insert " "))
+      (insert url)))
+  (elneo--debug-log "Matrix [%s] url drop: no image at %s"
+                    (buffer-local-value 'elneo-room--profile room-buffer)
+                    url)
+  (message "Matrix: no image at %s — the link is in the draft" url))
 
 (defun elneo-room-attach-dired (&optional dir)
   "Open a dired buffer to pick files to attach to this room.

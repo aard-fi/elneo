@@ -14,8 +14,11 @@
 ;; URLs into the buffer as raw text, so a rejected drop must never
 ;; degenerate into a `file:/...' text message.  The matcher therefore
 ;; covers every file URL shape macOS hands over (`file:///', `file:/',
-;; `file://localhost/').  Every case here stubs the send path and pins
-;; its counter at zero: a drop must not produce an outgoing message.
+;; `file://localhost/').  URL drops take the second handler:
+;; images fetch to a temp file and attach; anything else — a page, a
+;; failed fetch — lands in the draft as the link itself.  Every case
+;; here stubs the send path and pins its counter at zero: a drop must
+;; not produce an outgoing message.
 ;;
 ;; The drafts file is pointed at a temp path — the draft-store
 ;; readback case dirties the table, and the kill-emacs-hook flush in
@@ -91,9 +94,12 @@
           ;; stock dnd behavior.
           (mx-check "register: room buffer's dnd-protocol-alist"
                     (with-current-buffer room dnd-protocol-alist)
-                    '(("^file:" . elneo-room-dnd-receive)))
+                    '(("^file:" . elneo-room-dnd-receive)
+                      ("^https?:" . elneo-room-dnd-receive-url)))
           (mx-check "register: dnd-multiple-handler property"
                     (get 'elneo-room-dnd-receive 'dnd-multiple-handler) t)
+          (mx-check "register: url handler is a multiple handler too"
+                    (get 'elneo-room-dnd-receive-url 'dnd-multiple-handler) t)
           (mx-check "register: non-room buffer keeps default alist"
                     (default-value 'dnd-protocol-alist)
                     (copy-sequence (default-value 'dnd-protocol-alist)))
@@ -151,11 +157,13 @@
             (mx-check "drop: spaced file tagged"
                       (elneo-room--draft-text) (format "[image: %s]" spaced)))
 
-          ;; Not a file:// URI: skipped, nothing inserted.  The
-          ;; private answer is the no-raw-URL-insertion contract.
+          ;; Not a file:// URI: the FILE handler leaves it alone —
+          ;; https URLs belong to the URL handler, which the alist
+          ;; routes them to.  The private answer still holds: the
+          ;; no-raw-URL-insertion contract.
           (with-current-buffer room
             (elneo-room--reset-input-area "")
-            (mx-check "drop: non-file URI ignored"
+            (mx-check "drop: file handler leaves https URLs alone"
                       (elneo-room-dnd-receive '("https://example/x.pdf") 'private)
                       'private)
             (mx-check "drop: draft unchanged for non-file URI"
@@ -239,6 +247,102 @@
             (mx-check "drop: two drops accumulate"
                       (elneo-room--draft-text)
                       (format "[image: %s] [file: %s]" pic doc)))
+
+          ;; URL drops: an image URL fetches to a temp file and
+          ;; attaches; anything else — a page, a failed fetch — lands
+          ;; in the draft as the link itself, so RET sends it.  The
+          ;; fetch is stubbed to answer synchronously with a scripted
+          ;; body, so the draft checks are exact.  One real PNG (1x1,
+          ;; base64) rides through byte-for-byte.
+          (let* ((png (base64-decode-string
+                       "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
+                 (mx-body "") (mx-status nil) (fetches 0))
+            (cl-letf (((symbol-function 'url-retrieve)
+                       (lambda (_url cb &rest _)
+                         (cl-incf fetches)
+                         (with-current-buffer (generate-new-buffer " *mx-url*")
+                           (insert "HTTP/1.1 200 OK\r\n\r\n" mx-body)
+                           (funcall cb mx-status)))))
+              ;; Image: temp file under the URL's basename, bytes intact.
+              (setq mx-body png)
+              (with-current-buffer room
+                (elneo-room--reset-input-area "")
+                (mx-check "url drop: image attaches, returns private"
+                          (elneo-room-dnd-receive-url
+                           '("https://x.example/cat.png") 'private)
+                          'private)
+                (let ((paths (elneo-room--tag-paths (elneo-room--draft-text))))
+                  (mx-check "url drop: one temp file, cat-named, image-tagged"
+                            (and (= (length paths) 1)
+                                 (string-match-p "/elneo-drop-cat" (car paths))
+                                 (string= (file-name-extension (car paths)) "png")
+                                 (file-exists-p (car paths)))
+                            t)
+                  (mx-check "url drop: the bytes arrived intact"
+                            (with-temp-buffer
+                              (set-buffer-multibyte nil)
+                              (insert-file-contents-literally (car paths))
+                              (and (= (buffer-size) (length png))
+                                   (string-equal (buffer-string) png)))
+                            t)
+                  (delete-file (car paths))))
+              ;; jpeg sniffs to type 'jpeg; the temp file must say jpg.
+              (with-current-buffer room
+                (elneo-room--reset-input-area "")
+                (elneo-room--attach-image-data
+                 "junk" 'jpeg "https://x.example/pic.JPG" room)
+                (let ((paths (elneo-room--tag-paths (elneo-room--draft-text))))
+                  (mx-check "url drop: jpeg type maps to a .jpg temp file"
+                            (and (string-match-p "/elneo-drop-pic" (car paths))
+                                 (string= (file-name-extension (car paths)) "jpg"))
+                            t)
+                  (delete-file (car paths))))
+              ;; A page instead of an image: the URL lands in the draft.
+              (setq mx-body "<html>not an image</html>")
+              (with-current-buffer room
+                (elneo-room--reset-input-area "")
+                (elneo-room-dnd-receive-url '("https://x.example/page") 'private)
+                (mx-check "url drop: a page drops in as the link"
+                          (elneo-room--draft-text) "https://x.example/page"))
+              ;; A failed fetch (dead host): the URL still lands in the
+              ;; draft — the link may be worth sending even when the
+              ;; fetch could not see an image.
+              (setq mx-body "" mx-status '(:error (error "connection refused")))
+              (with-current-buffer room
+                (elneo-room--reset-input-area "")
+                (elneo-room-dnd-receive-url '("https://x.example/dead") 'private)
+                (mx-check "url drop: a failed fetch drops in as the link"
+                          (elneo-room--draft-text) "https://x.example/dead"))
+              ;; The real dnd.el path assigns https URLs to the handler.
+              (let ((win (selected-window)))
+                (setq mx-body png mx-status nil)
+                (set-window-buffer win room)
+                (set-buffer room)
+                (elneo-room--reset-input-area "")
+                (with-current-buffer room
+                  (mx-check "dnd.el path: https drop routes to the url handler"
+                            (dnd-handle-multiple-urls
+                             win '("https://x.example/dog.png") 'private)
+                            'private)
+                  (let ((paths (elneo-room--tag-paths (elneo-room--draft-text))))
+                    (mx-check "dnd.el path: fetched image tagged"
+                              (and (= (length paths) 1)
+                                   (file-exists-p (car paths))
+                                   (string= (file-name-extension (car paths))
+                                            "png"))
+                              t)
+                    (delete-file (car paths)))))
+              ;; An unrendered room refuses without fetching at all.
+              (with-current-buffer room
+                (setq elneo-room--backfilled nil)
+                (elneo-room--reset-input-area "")
+                (let ((before fetches))
+                  (mx-check "url drop: unrendered room refuses, no fetch"
+                            (list (elneo-room-dnd-receive-url
+                                   '("https://x.example/a.png") 'private)
+                                  (- fetches before))
+                            '(private 0)))
+                (setq elneo-room--backfilled t))))
 
           ;; A room that has not been rendered yet refuses — with
           ;; `private', so the URL is swallowed and not inserted as
