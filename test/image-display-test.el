@@ -16,6 +16,12 @@
 ;;   without a replacement — an undisplayable file degrades to a
 ;;   download-on-demand tag with the media properties intact and no
 ;;   `elneo-room-media-thumb', so the scanner does not refetch it.
+;;   A placeholder's caption (`elneo-room-media-caption', the
+;;   message body text) rides through the replacement on every path
+;;   — image, degraded tag, video frame, fetch-failure marker — on
+;;   its own line under the media, indented to the body column (a
+;;   caption flowing right of a thumbnail is unreadable when
+;;   narrow), linkified, still carrying the event id.
 ;; - `elneo-image--insert-file': the viewer names the file and
 ;;   points at `o' instead of inserting a nil image; either way the
 ;;   downloaded file stays current for `o'.
@@ -178,7 +184,7 @@
   ;; without a replacement.
   (defvar mx-beg)
   (defvar mx-end)
-  (defun mx-placeholder (media-data name)
+  (defun mx-placeholder (media-data name &optional caption)
     "Insert a placeholder at point and record its bounds."
     (insert "before ")
     (setq mx-beg (point))
@@ -186,6 +192,7 @@
                         'elneo-room-media-thumb t
                         'elneo-room-media-data media-data
                         'elneo-room-media-name name
+                        'elneo-room-media-caption caption
                         'elneo-room-event-id "$ev"))
     (setq mx-end (point))
     (insert " after"))
@@ -291,6 +298,107 @@ A video's play prefix is deliberately read-only, so plain
         (elneo-room--put-image mx-beg mx-end "/cache/png" "$ev"))
       (mx-check "put-image: a displayable video keeps the play prefix"
                 (buffer-string) "before ▶ [video]  after"))
+
+    ;; A caption (the message's body text) rides through the
+    ;; replacement — the placeholder text dies in the delete, the
+    ;; caption must not die with it.
+    (with-current-buffer buffer
+      (mx-reset)
+      (mx-placeholder '((mimetype . "image/webp")) "x.png"
+                       "look at this https://example.com/cat")
+      (cl-letf (((symbol-function 'elneo--image-for-display)
+                 (lambda (_path) "/cache/png"))
+                ((symbol-function 'create-image)
+                 (lambda (&rest _args) '(fake-image)))
+                ((symbol-function 'insert-image)
+                 (lambda (_img string &rest _props) (insert string))))
+        (elneo-room--put-image mx-beg mx-end "/cache/png" "$ev"))
+      (mx-check "put-image: the caption survives the replacement"
+                (buffer-string)
+                (concat "before [image] \n"
+                        (make-string (elneo-room--body-column) ?\s)
+                        "look at this https://example.com/cat after"))
+      ;; text-property-any compares with eq, and the URL property's
+      ;; value is a string — locate the URL's buffer position by text
+      ;; and read the properties there.
+      (let ((pos (save-excursion
+                   (goto-char (point-min))
+                   (and (search-forward "https://example.com/cat"
+                                        (point-max) t)
+                        (- (point) (length "https://example.com/cat"))))))
+        (mx-check "put-image: the caption linkifies"
+                  (and pos
+                       (equal (get-text-property pos 'elneo-room-url)
+                              "https://example.com/cat"))
+                  t)
+        (mx-check "put-image: the caption carries the event id"
+                  (and pos (get-text-property pos 'elneo-room-event-id))
+                  "$ev")
+        ;; The caption line belongs to the message block: block-bounds
+        ;; must reach past it, or a re-render orphans the line under
+        ;; the fresh render.
+        (mx-check "put-image: the caption line belongs to the block"
+                  (let ((bounds (elneo-room--block-bounds "$ev")))
+                    (and bounds
+                         (>= (cdr bounds)
+                             (save-excursion
+                               (goto-char (point-min))
+                               (search-forward "https://example.com/cat")
+                               (point)))))
+                  t)))
+
+    ;; The degraded tag keeps the caption too — the tag names the
+    ;; file, the caption follows it.
+    (with-current-buffer buffer
+      (mx-reset)
+      (mx-placeholder '((mimetype . "image/webp")) "x.png" "a caption")
+      (cl-letf (((symbol-function 'elneo--image-for-display)
+                 (lambda (_path) nil)))
+        (elneo-room--put-image mx-beg mx-end "/cache/avif" "$ev"))
+      (mx-check "put-image: the caption survives the undisplayable tag"
+                (buffer-string)
+                (concat "before [image: x.png]\n"
+                        (make-string (elneo-room--body-column) ?\s)
+                        "a caption after")))
+
+    ;; A video's caption follows the fetched frame.
+    (with-current-buffer buffer
+      (mx-reset)
+      (mx-placeholder '((mimetype . "video/mp4")) "clip.mp4" "a caption")
+      (cl-letf (((symbol-function 'elneo--image-for-display)
+                 (lambda (_path) "/cache/png"))
+                ((symbol-function 'create-image)
+                 (lambda (&rest _args) '(fake-image)))
+                ((symbol-function 'insert-image)
+                 (lambda (_img string &rest _props) (insert string))))
+        (elneo-room--put-image mx-beg mx-end "/cache/png" "$ev"))
+      (mx-check "put-image: a video's caption follows the frame"
+                (buffer-string)
+                (concat "before ▶ [video] \n"
+                        (make-string (elneo-room--body-column) ?\s)
+                        "a caption after")))
+
+    ;; The fetch-failure marker keeps the caption as well.
+    (with-current-buffer buffer
+      (mx-reset)
+      (mx-placeholder '((mimetype . "image/webp")) "x.png" "a caption")
+      (elneo-room--on-media buffer "$ev" '((error . "404")))
+      (mx-check "on-media: a failed fetch keeps the caption"
+                (buffer-string)
+                (concat "before [image unavailable]\n"
+                        (make-string (elneo-room--body-column) ?\s)
+                        "a caption after"))
+      ;; The failure marker carries the event id, so the block (marker
+      ;; plus caption line) stays findable for a re-render.
+      (mx-check "on-media: a failed marker keeps the block findable"
+                (let ((bounds (elneo-room--block-bounds "$ev")))
+                  (and bounds
+                       (>= (cdr bounds)
+                           (save-excursion
+                             (goto-char (point-min))
+                             (search-forward "a caption")
+                             (point)))))
+                t))
     (kill-buffer buffer))
 
   ;; ---- elneo-image--insert-file: the viewer names the file and

@@ -132,6 +132,38 @@
                       t)))
       (kill-buffer buf)))
 
+  ;; 3b. an unnamed video previews the same way: the placeholder
+  ;; carries the caption (the body), the tag line stays bare — the
+  ;; caption belongs after the fetched frame, not in the tag.
+  (let ((buf (mx-video-room)))
+    (unwind-protect
+        (with-current-buffer buf
+          (mx-append-video
+           '((source (url . "mxc://hs/vid"))
+             (thumb_source (url . "mxc://hs/vidthumb"))
+             (mimetype . "video/mp4")))
+          (goto-char (point-min))
+          (mx-check "unnamed: the caption rides the placeholder"
+                    (and (search-forward "[video: holiday clip]" nil t) t) t)
+          (goto-char (point-min))
+          (mx-check "unnamed: the tag line carries no caption"
+                    (and (search-forward "[video]" nil t) t) t)
+          (goto-char (point-min))
+          (mx-check "unnamed: the caption is not the media name"
+                    (get-text-property
+                     (progn (search-forward "[video: holiday clip]")
+                            (match-beginning 0))
+                     'elneo-room-media-name)
+                    nil)
+          (mx-check "unnamed: the caption rides as a caption"
+                    (get-text-property
+                     (progn (goto-char (point-min))
+                            (search-forward "[video: holiday clip]")
+                            (match-beginning 0))
+                     'elneo-room-media-caption)
+                    "holiday clip"))
+      (kill-buffer buf)))
+
   ;; 4. the negative gate renders: no thumb → the same single tag as
   ;; today, and no fetchable span anywhere.
   (let ((buf (mx-video-room)))
@@ -205,7 +237,22 @@
               (mx-check "fetch: nothing re-fetches on a next pass"
                         (text-property-any
                          (point-min) (point-max) 'elneo-room-media-thumb t)
-                        nil))))
+                        nil))
+            ;; The fetched caption line belongs to the block: a
+            ;; re-render (an edit, say) must delete it with the block
+            ;; instead of orphaning a stale caption line — and a
+            ;; stale tag line, same story — under the fresh render.
+            (elneo-room--replace-message
+             "$v1" (list :event-id "$v1"
+                         :ts (* 1000 (time-to-seconds
+                                      (encode-time '(0 0 12 13 10 2026))))
+                         :sender "@a:mx.org" :is-own nil
+                         :msgtype "m.video" :body "holiday clip"
+                         :media (mx-video-media)))
+            (mx-check "fetch: a re-render leaves no orphan caption"
+                      (how-many "holiday clip") 1)
+            (mx-check "fetch: a re-render leaves no orphan tag"
+                      (how-many (regexp-quote "[video: clip.mp4")) 1)))
       (kill-buffer buf)))
 
   ;; 6. the failed fetch says so, as a video; an image keeps the old one

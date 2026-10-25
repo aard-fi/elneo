@@ -1547,7 +1547,7 @@ deletes exactly one).  Everything else — including anything the
   (let ((key (replace-regexp-in-string elneo-room--bidi-control-re "" key)))
     ;; U+240A/240D, the printable line-feed/carriage-return symbols.
     (replace-regexp-in-string "\r" "␍"
-      (replace-regexp-in-string "\n" "␊" key))))
+                              (replace-regexp-in-string "\n" "␊" key))))
 
 (defun elneo-room--reaction-image-glyph (mxc)
   "An image object for reaction-image MXC, or nil when it shows nothing.
@@ -2326,7 +2326,9 @@ the fetch scan keys on `elneo-room-media-thumb' and replaces it with
 the sender's frame — then, indented to the body column, the
 download-on-demand tag.  The tag keeps the video visibly a video
 after the fetch and keeps open/save where they always were; BODY
-fills the placeholder like a picture's caption does.  The caller
+fills the placeholder like a picture's caption and, like one, rides
+back in after the fetched frame; the tag line names only the file,
+so the caption never shows twice.  The caller
 (the message's second-line machinery) has already positioned point
 at the body column."
   (insert (propertize
@@ -2335,17 +2337,20 @@ at the body column."
            'elneo-room-media t
            'elneo-room-media-thumb t
            'elneo-room-media-data media
+           'elneo-room-media-name (elneo-room--media-name media)
+           'elneo-room-media-caption body
            'elneo-room-event-id event-id))
   (insert "\n"
           (make-string (elneo-room--body-column) ?\s)
           (propertize
-           (format "[video: %s%s]"
-                   (or (elneo-room--media-name media) body)
-                   (elneo-room--media-size-tag media))
+           (let ((name (elneo-room--media-name media)))
+             (if name
+                 (format "[video: %s%s]" name (elneo-room--media-size-tag media))
+               (format "[video%s]" (elneo-room--media-size-tag media))))
            'face 'shadow
            'elneo-room-media t
            'elneo-room-media-data media
-           'elneo-room-media-name (or (elneo-room--media-name media) body)
+           'elneo-room-media-name (elneo-room--media-name media)
            'elneo-room-event-id event-id)))
 
 (defun elneo-room--insert-body (msg)
@@ -2400,6 +2405,8 @@ line and the per-message markers are the callers'."
               ;; the fetch scan below requires media to fetch.  m.file
               ;; goes through the download-on-demand arm below; a
               ;; thumbnailed m.video goes through the preview arm.
+              ;; BODY is the caption: put-image re-inserts it
+              ;; under the fetched image (Element-style).
               (let ((kind (string-remove-prefix "m." msgtype)))
                 (propertize
                  (if (> (length body) 0) (format "[%s: %s]" kind body)
@@ -2408,6 +2415,8 @@ line and the per-message markers are the callers'."
                  'elneo-room-media t
                  'elneo-room-media-thumb t
                  'elneo-room-media-data media
+                 'elneo-room-media-name (elneo-room--media-name media)
+                 'elneo-room-media-caption body
                  'elneo-room-event-id event-id)))
              ((and (string= msgtype "m.audio") media (alist-get 'voice media))
               ;; Voice note (MSC3245): waveform bars plus duration,
@@ -3085,8 +3094,8 @@ with its thumbnail as the entry's annotation."
           (user-error "Cannot react to a message that is not on the server yet"))
          (t
           (let ((key (let ((completion-extra-properties
-                           '(:annotation-function
-                             elneo-room--reaction-annotation)))
+                            '(:annotation-function
+                              elneo-room--reaction-annotation)))
                        (completing-read "Reaction: " collection nil nil))))
             (when (> (length key) 0)
               (elneo-send-reaction
@@ -5708,8 +5717,9 @@ message."
 (defun elneo-room--block-bounds (event-id)
   "Cons (BEG . END) of EVENT-ID's rendered block, or nil.
 The block is the message's last line (the indented body line for a
-reply or picture), the name line above it when there is one, and
-the reaction line below it when there is one — exactly the region
+reply or picture), the name line above it when there is one, the
+reaction line below it when there is one, and the caption or tag
+lines a media fetch inserts under the body — exactly the region
 `elneo-room--replace-message' re-renders and the send lifecycle
 deletes (`elneo-room--remove-message').  nil when the event is
 not rendered here."
@@ -5752,19 +5762,23 @@ not rendered here."
                               (point))))
                (block-end (save-excursion
                             (goto-char (min (point-max) (1+ msg-end)))
-                            ;; The poll block's option lines (a poll's
-                            ;; extra lines, the reaction line possibly
-                            ;; after them) extend the block downward.
-                            ;; After the walk point sits on the first
-                            ;; char of the next content — the block
-                            ;; ends exactly there (the last extra
-                            ;; line's newline is one back, and already
+                            ;; The block extends downward over its own
+                            ;; extra lines: poll option lines, the
+                            ;; reaction line, and the media fetch's
+                            ;; caption/tag lines (they carry the event
+                            ;; id).  Point ends on the first char of
+                            ;; the next content — the block ends
+                            ;; exactly there (the last extra line's
+                            ;; newline is one back, and already
                             ;; deleted).
                             (while (and (< (point) (point-max))
                                         (or (get-text-property (point)
                                                                'elneo-room-poll-line)
                                             (get-text-property (point)
-                                                               'elneo-room-reaction-line)))
+                                                               'elneo-room-reaction-line)
+                                            (equal (get-text-property
+                                                    (point) 'elneo-room-event-id)
+                                                   event-id)))
                               (goto-char (min (point-max) (1+ (line-end-position)))))
                             (point))))
           (cons block-beg block-end))))))
@@ -7619,14 +7633,33 @@ what string event ids need."
                   ;; Read before the delete: the char at BEG after it is
                   ;; the following text, not the placeholder.
                   (video (elneo-room--video-media-p
-                          (get-text-property beg 'elneo-room-media-data))))
+                          (get-text-property beg 'elneo-room-media-data)))
+                  (caption (get-text-property beg 'elneo-room-media-caption)))
               (save-excursion
                 (goto-char beg)
                 (delete-region beg end)
-                ;; A video's failed thumb still reads as one.
+                ;; A video's failed thumb still reads as one.  The
+                ;; event id and caption keep the block findable,
+                ;; like put-image does.
                 (insert (propertize
                          (if video "[video unavailable]" "[image unavailable]")
-                         'face 'shadow 'read-only t))))))))))
+                         'face 'shadow 'read-only t
+                         'elneo-room-event-id event-id))
+                (elneo-room--insert-media-caption caption event-id)))))))))
+
+(defun elneo-room--insert-media-caption (caption event-id)
+  "Insert CAPTION on its own line under a just-inserted media cell,
+indented to the body column and linkified like a plain body.
+EVENT-ID rides on the whole run so `elneo-room--block-bounds'
+counts the line as part of the block and a re-render deletes it
+with the message, not orphaned under the fresh render."
+  (when (> (length caption) 0)
+    (insert
+     (propertize
+      (concat "\n" (make-string (elneo-room--body-column) ?\s)
+              (elneo-room--indent-newlines
+               (elneo-room--linkify-string caption)))
+      'elneo-room-event-id event-id))))
 
 (defun elneo-room--put-image (beg end file event-id)
   "Replace BEG..END with the image stored at FILE.
@@ -7646,9 +7679,17 @@ instead of vanishing.  The tag keeps the media properties, so
 `o'/RET still open the original file in an external viewer, which
 shows the formats Emacs cannot; it too carries no
 `elneo-room-media-thumb', so the scanner does not re-fetch it on
-every scroll pass."
+every scroll pass.
+
+The placeholder's caption (`elneo-room-media-caption') is
+re-inserted on its own line under the image — inline, it would be
+unreadable next to a thumbnail on a narrow display, and it would
+otherwise die with the placeholder in the `delete-region'.  The
+line carries the event id, so the block walk keeps it in the
+block."
   (let* ((media (get-text-property beg 'elneo-room-media-data))
          (name (get-text-property beg 'elneo-room-media-name))
+         (caption (get-text-property beg 'elneo-room-media-caption))
          (video (elneo-room--video-media-p media))
          ;; FILE has no reliable extension (thumbs are cached
          ;; extensionless), so display type comes from content —
@@ -7677,7 +7718,8 @@ every scroll pass."
                                           'elneo-room-media-data media
                                           'elneo-room-media-name name
                                           'read-only t))
-            (insert " "))
+            (insert " ")
+            (elneo-room--insert-media-caption caption event-id))
         (let ((kind (if video "video" "image")))
           (insert (propertize
                    (if name (format "[%s: %s]" kind name)
@@ -7686,7 +7728,8 @@ every scroll pass."
                    'elneo-room-media (when media t)
                    'elneo-room-media-data media
                    'elneo-room-media-name name
-                   'elneo-room-event-id event-id)))))))
+                   'elneo-room-event-id event-id))
+          (elneo-room--insert-media-caption caption event-id))))))
 
 ;;; Downloaded files
 
