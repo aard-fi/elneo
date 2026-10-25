@@ -58,19 +58,22 @@ The device verification workflow is currently a bit less hands off than it shoul
 
 * Features
 
-TL;DR: Pretty much everything apart from voice calling/messaging and video calling. Media playback relies on downloading media and playing via whatever is configured in emacs to handle that.
+TL;DR: Pretty much everything apart from voice and video calling — voice notes received from others display as waveforms and can be played back with a configured player (sending them is not supported). Media playback relies on downloading media and playing via whatever is configured in emacs to handle that.
 
 - *Multi-account, all online at once*: rooms from every account appear in one merged room bar.
-- *Fixed room bar*: one side window spanning the frame height, with live-re-sorting on room activity, and various filter options.
+- *Fixed room bar*: one side window spanning the frame height, with live-re-sorting on room activity, and various filter options. The bar folds into a narrow rail (=w= in the bar, or the « handle): one avatar initial and unread badge per room, built for narrow frames and touch (=elneo-room-bar-resting-state= picks the shape a fresh bar starts in; experimental).
 - *Room buffers*: history backfill, live message appends, sending, replies, reactions, edits and redactions, read receipts, copy messages and message links, forward messages, pinned messages, drafts surviving buffer kill, encryption backfill, ...
+- *Room management*: the =C-c ?= settings view puts actions next to the facts they act on — name and topic, invite/kick/ban, per-room notification modes (all messages, mentions and keywords, muted), leave and forget, and pointers into upgraded rooms.
 - *Mention completion*: typing =@= in a room draft offers the room's member roster in a minibuffer picker. =@room= also is available.
-- *Media*: on-disk media caching (view with =elneo-media-cache-dired=), background fetching and back-fill. Pictures are displayed inline, if possible, for all other media types we rely on downloading and playing back with whatever is configured in emacs. Attaching works by selecting a direct file, selecting via dired, sending from dired, sending from any buffer with a file attached, or by drag and drop.
+- *Media*: on-disk media caching (view with =elneo-media-cache-dired=), background fetching and back-fill. Pictures are displayed inline, video messages show the sender's thumbnail with a =▶= mark, and an image or video caption renders on its own line under the thumbnail; voice notes render as waveforms; =RET= downloads the file and hands it to =elneo-voice-player-command= (a command like mpv) or, when unset, to whatever =elneo-open-file-function= opens media with — =ready-player-mode= makes playback work, the default =find-file= just shows the bytes. Formats Emacs cannot decode are converted on the way in (built-in =image-convert= first, then sips/magick), and images can be rescaled on the way out (a =C-u= on send prompts for a size; =elneo-image-oversize-action= can ask about big ones first). Attaching works by selecting a direct file, selecting via dired, sending from dired, sending from any buffer with a file attached, or by drag and drop.
+- *Image viewer*: =v= on an inline picture opens it full-size in a dedicated buffer; =n=/=p= walk the room's images, the =image-mode= zoom keys work, and =o= hands the original to your configured viewer. Room and account avatars open in the same viewer.
 - *Polls* (MSC3381): Experimental support for both creating and answering polls - this seems to be about the messiest bit supported here, and with server side unread number counting may do weird things on reported unread messages when people vote.
 - *Threads* (MSC3440): there is experimental threads support, with threads marked with =🧵= and a different background colour. Threads can be viewed in an extra buffer, and main buffer replies to thread message also should make it into the correct thread.
 - *Space discovery*: =b= on a space's room-bar row (or =M-x elneo-space-browse=) opens the space's page: the rooms the space offers, with member counts and join rules, joinable straight from the listing.
 - *Screenshot mode* (=M-x elneo-anon-mode=): rewrites every user-identifiable display string to plausible fake text, while structural bits survive: =(telegram)=-style  bridge suffixes, unread counts, timestamps, reactions, and real images keep rendering. Fakes are render-time only.
-- *Encryption-first*: built on matrix-rust-sdk with full E2EE, cross-signing bootstrap, and persistent crypto stores
+- *Encryption-first*: built on matrix-rust-sdk with full E2EE, cross-signing bootstrap, and persistent crypto stores — interactive device verification (SAS emoji compare), key backup, and recovery-key rotation included (see the [[#device-verification-and-key-recovery][device verification and key recovery]] section).
 - *Persistent sessions*: each daemon keeps its session, so reconnecting doesn't re-login.
+- *Session health*: a daemon that died on its own comes back with a doubling backoff (=elneo-server-auto-restart=), the bar header carries a per-daemon status glyph (click to restart), and the optional =elneo-mode-line-mode= shows unread and mention counts — plus a warning while any daemon is down.
 - *Alert integration* (opt-in): =(require 'elneo-alert)= feeds incoming messages into =alert.el=, with cross-device alert cleaning of read messages possible. Full and partial muting of rooms is supported.
 - *Org-mode integration*: org links and org-capture support is provided
 
@@ -184,7 +187,7 @@ Bare keys are commands on the history and self-insert in the draft — the same 
 | =RET=     | =elneo-room--ret=              | on the history: prompt for the message in the minibuffer |
 | =RET=     | =elneo-room--ret=              | on a reply quote: jump to the message it answers         |
 | =RET=     | =elneo-room--ret=              | on a link at point: open it in =browse-url=                |
-| =RET=     | =elneo-room--ret=              | on a voice message: play it                              |
+| =RET=     | =elneo-room--ret=              | on a voice message: download and hand it to your player   |
 | =C-j=     | =elneo-room--input-newline=    | Newline (multi-line drafts)                              |
 | =C-c C-c= | =elneo-room-send=              | Prompt for the message in the minibuffer instead         |
 | =C-c C-a= | =elneo-room-attach=            | Attach a file by path (= [image: PATH]= / =[file: PATH]=)  |
