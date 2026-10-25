@@ -387,6 +387,10 @@ parent that is not loaded yet."
         (define-key map (kbd "q") #'elneo-room--q)
         (define-key map (kbd "r") #'elneo-room--r)
         (define-key map (kbd "a") #'elneo-room--a)
+        ;; `X' reacts with an arbitrary, unfiltered key — which, unlike a,
+        ;; allows for sending events that typically would not be seen, allowing
+        ;; client testing
+        (define-key map (kbd "X") #'elneo-room--X)
         (define-key map (kbd "d") #'elneo-room--d)
         (define-key map (kbd "e") #'elneo-room--e)
         ;; `m' stays reserved for telega's mark-message; room settings
@@ -1496,27 +1500,191 @@ the buffer's property layout (see
     (when img-beg
       (put-text-property img-beg img-end 'face 'shadow))))
 
+;;; Image reactions and reaction-line display
+
+(defun elneo-room--image-reaction-key-p (key)
+  "Non-nil when reaction KEY keys on a custom image's MXC.
+Some clients react with a sticker: its MXC sits in the key, and
+the image is the whole reaction.  The text such clients show
+instead — the event's `shortcode' field — never reaches the
+aggregate elneo ships (:key :count :own only)."
+  (and (stringp key) (string-prefix-p "mxc://" key)))
+
+;; The bidi controls (marks, embeddings, overrides, isolates) plus
+;; newline and carriage return, the characters a hostile key would use
+;; to shape the text around it (see `elneo-room--reaction-visible-key').
+(defconst elneo-room--bidi-control-re
+  (concat "[" (string ?‎ ?‏ ?‪ ?‫ ?‬
+                      ?‭ ?‮ ?⁦ ?⁧ ?⁨ ?⁩) "]"))
+
+(defun elneo-room--reaction-visible-key (key)
+  "The inert display text of a reaction KEY.
+A key is an arbitrary string any room member can send, so no key
+gets to shape the room buffer.  Bidi controls come out: an
+embedding in the key would re-order the glyphs beside it — the
+count, the next react, the `‹'.  A newline or carriage return
+renders as its symbol glyph (the quote does not matter: a literal
+newline would still start a physical line, and the line redraw
+deletes exactly one).  Everything else — including anything the
+`X' react prompt lets you type — passes through verbatim."
+  (let ((key (replace-regexp-in-string elneo-room--bidi-control-re "" key)))
+    ;; U+240A/240D, the printable line-feed/carriage-return symbols.
+    (replace-regexp-in-string "\r" "␍"
+      (replace-regexp-in-string "\n" "␊" key))))
+
+(defun elneo-room--reaction-image-glyph (mxc)
+  "An image object for reaction-image MXC, or nil when it shows nothing.
+The sticker (the file the cache holds) renders through
+`elneo--image-for-display' so a format this Emacs cannot decode
+still shows, kept to at most two text lines tall."
+  (and mxc
+       (when-let* ((file (elneo-client--reaction-file mxc))
+                   (display (elneo--image-for-display file)))
+         (condition-case nil
+             (create-image display nil nil :ascent 100
+                           :max-height (* 2 (default-font-height))
+                           :max-width (* 8 (default-font-width)))
+           (error nil)))))
+
+(defun elneo-room--reaction-image-cell (mxc)
+  "The cell of the image reaction with MXC: the sticker, or its tag.
+The image cell is a single space carrying the `display'-loaded
+image.  The tag is what renders before the image arrives (never,
+on a terminal) and what the arrival pass keys on: both cells carry
+`elneo-room-reaction-image'."
+  (let ((img (elneo-room--reaction-image-glyph mxc)))
+    (if img
+        ;; The glyph reads its own width, so the count never sits on
+        ;; bare text.
+        (propertize " " 'display img 'elneo-room-reaction-image mxc)
+      (propertize "[image react]"
+                  'face 'elneo-room-reaction
+                  'elneo-room-reaction-image mxc))))
+
+(defun elneo-room--reaction-annotation (key)
+  "Annotation for candidate KEY in the `a' reaction prompt.
+Two stickers differ by nothing but their picture — the MXC URL is
+the only text to go on — so the annotation shows the thumbnail
+itself when it is already cached (the message it is on has fetched
+it by the time the prompt opens).  Any other candidate — emoji,
+free text, a sticker still waiting — annotates with nothing."
+  (when (elneo-room--image-reaction-key-p key)
+    (when-let* ((img (elneo-room--reaction-image-glyph key)))
+      (propertize " " 'display img))))
+
+(defun elneo-room--ensure-reaction-image (mxc)
+  "Fetch reaction-image MXC unless it is downloaded or in flight.
+Only a graphic display benefits: a terminal keeps the tag and
+spends no download.  The fetch is cached by MXC and joins
+in-flight ones (`elneo-client-fetch-reaction-image'); each
+arrival pass redraws the room's pending cells."
+  (when (and (display-graphic-p)
+             (not (gethash mxc elneo-client--reaction-cache))
+             (not (gethash mxc elneo-client--reaction-pending)))
+    (let ((buffer (current-buffer)))
+      (elneo-client-fetch-reaction-image
+       elneo-room--profile mxc
+       (lambda (_profile _event)
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (elneo-room--reactions-arrived))))))))
+
+(defun elneo-room--reaction-entry-cell (e)
+  "The rendered cell of one aggregated reaction entry E.
+An MXC key shows the sticker (tag until it arrives); anything else
+is text.  The count never blends into the key text: it renders as
+a separate `×N', and a key holding whitespace — a text react — is
+shown quoted, so \"hier ein text react\" stays a quote instead of
+colliding with its own count.  Keys render inert — see
+`elneo-room--reaction-visible-key'."
+  (let* ((raw (plist-get e :key))
+         (key (if (elneo-room--image-reaction-key-p raw)
+                  raw (elneo-room--reaction-visible-key raw)))
+         (count (or (plist-get e :count) 1))
+         (face (if (plist-get e :own)
+                   'elneo-room-reaction-own
+                 'elneo-room-reaction)))
+    (if (elneo-room--image-reaction-key-p raw)
+        (progn
+          (elneo-room--ensure-reaction-image raw)
+          (concat (elneo-room--reaction-image-cell raw)
+                  (when (> count 1)
+                    (propertize (format " ×%d" count) 'face face))))
+      (propertize (concat (if (string-match-p "[[:space:]\n\r]" raw)
+                              (format "\"%s\"" key)
+                            key)
+                          (when (> count 1)
+                            (format " ×%d" count)))
+                  'face face))))
+
+(defun elneo-room--redraw-reaction-line (pos)
+  "Redraw the reaction line starting at POS from the room's reactions table."
+  (let ((inhibit-read-only t)
+        (event-id (get-text-property pos 'elneo-room-event-id))
+        (ts (get-text-property pos 'elneo-room-ts)))
+    (goto-char pos)
+    (delete-region (line-beginning-position)
+                   (min (point-max) (1+ (line-end-position))))
+    (elneo-room--insert-reaction-line
+     event-id ts
+     (and (hash-table-p elneo-room--reactions)
+          (gethash event-id elneo-room--reactions)))))
+
+(defun elneo-room--reactions-arrived ()
+  "Redraw this room buffer's reaction cells with arrived images.
+Runs from a reaction-image fetch callback: every reaction cell
+whose tag's MXC has since hit the cache re-renders with the
+sticker image.  Redraw happens by rewriting the whole line — its
+event-id and ts properties survive it — and each line redraws at
+most once per pass, so a line carrying stickers that are only
+partly arrived stays a tag for the next arrival instead of
+looping."
+  (let ((inhibit-read-only t)
+        (seen nil))
+    (save-excursion
+      (goto-char (point-min))
+      (while (< (point) (point-max))
+        (let* ((next (next-single-property-change
+                      (point) 'elneo-room-reaction-image nil (point-max)))
+               (event-id (and next (get-text-property next 'elneo-room-event-id)))
+               ;; Redraw only lines with an aggregate present: this
+               ;; table outlives the line markers by one full
+               ;; refresh, so a marker left behind (room reset, other
+               ;; event) would otherwise redraw to a bare `‹' and
+               ;; arm a fetch for an event nobody shows.
+               (entries (and event-id
+                             (hash-table-p elneo-room--reactions)
+                             (gethash event-id elneo-room--reactions))))
+          (cond
+           ((not next) (goto-char (point-max)))
+           ((or (not entries) (member event-id seen))
+            (goto-char (1+ next)))
+           (t
+            (push event-id seen)
+            ;; The line holding the marker is where the redraw
+            ;; starts: `line-beginning-position' counts lines, so
+            ;; the beginning can only be had after pointing at it.
+            (elneo-room--redraw-reaction-line
+             (progn (goto-char next) (line-beginning-position)))
+            ;; Text shifted: restart the scan from the top, bounded by
+            ;; the event-ids already drawn (see above).
+            (goto-char (point-min)))))))))
+
 (defun elneo-room--insert-reaction-line (event-id ts entries)
   "Insert the aggregated reaction line for EVENT-ID below point.
 TS is the target message's timestamp (day separators and read
 marking key on it).  The `‹' marker keeps reactions visually
 separate from emoji typed into message bodies; own keys render
-bold."
+bold.  Image reactions render their sticker or, until it arrives,
+an `[image react]' tag; text keys show quoted and every count
+renders as a separate `×N' — see
+`elneo-room--reaction-entry-cell'."
   (let ((beg (point))
         (inhibit-read-only t))
     (insert (make-string (elneo-room--body-column) ?\s))
     (insert (propertize "‹ " 'face 'elneo-room-reaction))
     (when entries
-      (insert (mapconcat
-               (lambda (e)
-                 (propertize (if (> (or (plist-get e :count) 1) 1)
-                                 (format "%s %d" (plist-get e :key)
-                                         (plist-get e :count))
-                               (plist-get e :key))
-                             'face (if (plist-get e :own)
-                                       'elneo-room-reaction-own
-                                     'elneo-room-reaction)))
-               entries " ")))
+      (insert (mapconcat #'elneo-room--reaction-entry-cell entries " ")))
     (insert "\n")
     (put-text-property beg (1- (point)) 'elneo-room-event-id event-id)
     ;; The ts covers the trailing newline too — same property layout
@@ -2876,8 +3044,10 @@ in a thread sends INTO that thread (like Element)."
 (elneo-room--defkey elneo-room--a ?a
   "React to the message at point.
 Offers the keys of `elneo-room-reaction-emoji-options' plus the
-reactions already on the message, with free-form input accepted.
-Reacting with a key you already used toggles it off."
+reactions already on the message, with free-form input accepted;
+picking any of the latter adds yours (\"me too\"), picking one you
+already used toggles it off.  Sticker keys list their mxcs, each
+with its thumbnail as the entry's annotation."
   (let* ((id (elneo-room--event-id-at-point))
          (entries (and id (hash-table-p elneo-room--reactions)
                        (gethash id elneo-room--reactions)))
@@ -2897,7 +3067,68 @@ Reacting with a key you already used toggles it off."
          ((elneo-room--unsent-p msg)
           (user-error "Cannot react to a message that is not on the server yet"))
          (t
-          (let ((key (completing-read "Reaction: " collection nil nil)))
+          (let ((key (let ((completion-extra-properties
+                           '(:annotation-function
+                             elneo-room--reaction-annotation)))
+                       (completing-read "Reaction: " collection nil nil))))
+            (when (> (length key) 0)
+              (elneo-send-reaction
+               elneo-room--profile elneo-room--room-id id key
+               (lambda (profile event)
+                 (unless (alist-get '@ok event nil nil #'equal)
+                   (message "Matrix [%s] reaction failed: %s" profile
+                            (elneo-server--error-string event))))
+               (member key own-keys))))))))))
+
+(defun elneo-room--x-minibuffer-setup ()
+  "The `X' prompt's minibuffer setup: rebind C-j there.
+The minibuffer binds C-j to exit the prompt — but a verbatim key
+is exactly what this prompt is for, so C-j must insert the
+newline like C-q C-j would."
+  (local-set-key "\C-j"
+                 (lambda ()
+                   (interactive)
+                   (self-insert-command 1))))
+
+(defvar-local elneo-room--reaction-x-history nil
+  "Previously used keys of the `X' react prompt, this buffer's room.
+A toggle-off needs the key byte-for-byte, so recall it with M-p
+instead of re-typing it; own keys on the current message lead the
+past shenanigans.")
+
+(elneo-room--defkey elneo-room--X ?X
+  "React to the message at point with an arbitrary key.
+Unlike `a' there is no curation: what you type goes into the room
+exactly as typed, the key `X' to shenanigans.  C-j inserts a
+newline (the minibuffer exits on C-j otherwise — the prompt
+rebinds it), C-q any other character literally, bidi controls
+included — other clients may well render whatever comes out.
+elneo renders keys inert (see `elneo-room--reaction-visible-key');
+sending a key you own on this message again toggles it off, and
+M-p walks this room's previous keys."
+  (let* ((id (elneo-room--event-id-at-point))
+         (entries (and id (hash-table-p elneo-room--reactions)
+                       (gethash id elneo-room--reactions)))
+         ;; All our keys on the message: one of them re-sent toggles
+         ;; it off, so they lead the prompt's history on every open.
+         (own-keys (mapcar (lambda (e) (plist-get e :key))
+                           (cl-remove-if-not
+                            (lambda (e) (plist-get e :own)) entries))))
+    (if (null id)
+        (user-error "No message at point")
+      (let ((msg (gethash id elneo-room--seen)))
+        (cond
+         ;; Reacting to a provisional id would bounce off the server.
+         ((elneo-room--unsent-p msg)
+          (user-error "Cannot react to a message that is not on the server yet"))
+         (t
+          (setq elneo-room--reaction-x-history
+                (delete-dups (append own-keys elneo-room--reaction-x-history)))
+          (let ((key (minibuffer-with-setup-hook
+                         #'elneo-room--x-minibuffer-setup
+                       (read-string
+                        "React with key (verbatim; C-j newline, C-q controls): "
+                        nil 'elneo-room--reaction-x-history))))
             (when (> (length key) 0)
               (elneo-send-reaction
                elneo-room--profile elneo-room--room-id id key

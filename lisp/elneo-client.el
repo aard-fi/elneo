@@ -2652,48 +2652,49 @@ this, so one download renders identically everywhere."
      :max-height (default-font-height)
      :max-width (* (or cols 2) (default-font-width)))))
 
-(defun elneo-client-fetch-avatar (profile mxc callback)
-  "Fetch avatar MXC through PROFILE's daemon as a thumbnail.
+(defun elneo-client-fetch-image (profile mxc format callback cache pending)
+  "Fetch image MXC as FORMAT through PROFILE's daemon, sharing CACHE.
 CALLBACK (PROFILE RESPONSE-EVENT) runs once, immediately when the
 file is already cached, otherwise when the download lands; concurrent
 fetchers of the same MXC are joined into one download and all run.
-A failed download marks the MXC `failed' in the cache — callers fall
-back to the initial placeholder and do not re-request it forever.
-An empty mxc is treated the same way without a fetch: bridges leave
-`avatar_url' as \"\" in place of dropping it, and an empty key must
-never reach the daemon — its cache path would be the thumb directory
-itself, which then answers as already-cached media."
-  (let ((cached (elneo-client--avatar-file mxc)))
+A failed download marks the MXC `failed' in CACHE — callers fall
+back to their placeholder and do not re-request it forever.  An
+empty mxc is treated the same way without a fetch: an empty key must
+never reach the daemon — its cache path would be the format
+directory itself, which then answers as already-cached media.
+PENDING holds the joins of the in-flight download; the two tables
+belong to the calling surface (avatars share
+`elneo-client--avatar-cache', custom image reactions share
+`elneo-client--reaction-cache')."
+  (let ((displayed (gethash mxc cache)))
     (cond
      ((and (stringp mxc) (string-empty-p mxc))
-      (puthash mxc 'failed elneo-client--avatar-cache))
-     (cached
-      (funcall callback profile `((@ok . t) (path . ,cached))))
+      (puthash mxc 'failed cache))
+     ((and displayed (not (eq displayed 'failed)))
+      (funcall callback profile `((@ok . t) (path . ,displayed))))
      (t
-      (let ((pending (gethash mxc elneo-client--avatar-pending)))
-        (if pending
+      (let ((joiners (gethash mxc pending)))
+        (if joiners
             ;; Join the in-flight download instead of starting a second
-            ;; one for the same avatar.
-            (puthash mxc (nconc pending (list callback))
-                     elneo-client--avatar-pending)
-          (puthash mxc (list callback) elneo-client--avatar-pending)
+            ;; one for the same image.
+            (puthash mxc (nconc joiners (list callback)) pending)
+          (puthash mxc (list callback) pending)
           (let ((key mxc))
             ;; A failure to even start (daemon down, process gone) must
-            ;; not signal into the caller: the avatar render path runs
-            ;; inside message rendering.  Drop the pending entry so the
-            ;; next render retries, and surface it as a message.
+            ;; not signal into the caller: this runs inside rendering.
+            ;; Drop the pending entry so the next render retries, and
+            ;; surface it as a message.
             (condition-case err
                 (elneo-download-media
-                 profile `((url . ,mxc)) "thumb"
+                 profile `((url . ,mxc)) format
                  (lambda (cb-profile event)
                    ;; The cache entry exists before the callbacks run:
-                   ;; they re-render (open room buffers, open account
-                   ;; and room overviews) and must see the freshly
+                   ;; they re-render and must see the freshly
                    ;; downloaded path, not a cache that still misses.
                    ;; The callback list leaves the table before it is
                    ;; pruned — the callbacks run below.
-                   (let ((cbs (gethash key elneo-client--avatar-pending)))
-                     (remhash key elneo-client--avatar-pending)
+                   (let ((cbs (gethash key pending)))
+                     (remhash key pending)
                      ;; Only a real file counts as arrived: a directory
                      ;; path (e.g. the degenerate empty-mxc key) must
                      ;; be marked failed, not rendered.
@@ -2702,14 +2703,54 @@ itself, which then answers as already-cached media."
                                 (and (stringp path)
                                      (not (string-empty-p path))
                                      (not (file-directory-p path)))))
-                         (puthash key (alist-get 'path event)
-                                  elneo-client--avatar-cache)
-                       (puthash key 'failed elneo-client--avatar-cache))
+                         (puthash key (alist-get 'path event) cache)
+                       (puthash key 'failed cache))
                      (dolist (cb cbs)
                        (funcall cb cb-profile event)))))
               (error
-               (remhash key elneo-client--avatar-pending)
-               (message "Matrix avatar fetch failed: %s" (cdr err)))))))))))
+               (remhash key pending)
+               (message "Matrix image fetch failed: %s" (cdr err)))))))))))
+
+(defun elneo-client-fetch-avatar (profile mxc callback)
+  "Fetch avatar MXC through PROFILE's daemon as a thumbnail.
+CALLBACK (PROFILE RESPONSE-EVENT) runs once, immediately when the
+file is already cached, otherwise when the download lands; concurrent
+fetchers of the same MXC are joined into one download and all run.
+A failed download marks the MXC `failed' in the cache — callers fall
+back to the initial placeholder and do not re-request it forever.
+Bridges leave `avatar_url' as \"\" in place of dropping it; the
+empty mxc is marked `failed' without a fetch."
+  (elneo-client-fetch-image
+   profile mxc "thumb" callback
+   elneo-client--avatar-cache elneo-client--avatar-pending))
+
+(defvar elneo-client--reaction-cache (make-hash-table :test 'equal)
+  "Custom-reaction image MXC URL -> downloaded cache path, or `failed'.
+An image reaction keys on the MXC of the sticker it carries; the
+same sticker may back reactions in many messages and rooms, so the
+table is shared and the download happens once for it, not once per
+render.")
+
+(defvar elneo-client--reaction-pending (make-hash-table :test 'equal)
+  "Reaction-image MXC URL -> callbacks joined to the in-flight download.")
+
+(defun elneo-client--reaction-file (mxc)
+  "Cache path of reaction-image MXC, or nil when absent or failed."
+  (let ((path (and mxc (gethash mxc elneo-client--reaction-cache))))
+    (unless (eq path 'failed) path)))
+
+(defun elneo-client-fetch-reaction-image (profile mxc callback)
+  "Fetch the image behind the custom reaction keyed on MXC.
+Custom image reactions annotate with the sticker's MXC and carry
+no media envelope of their own, so the fetch rides the daemon's
+plain-media path and requests a server-made thumbnail: one per
+sticker, kept small.  CALLBACK (PROFILE RESPONSE-EVENT) runs once,
+joined across fetchers like the avatar fetch; a failed fetch
+marks the MXC `failed', and the reaction keeps its tag — an image
+that never arrives must not retry on every render pass."
+  (elneo-client-fetch-image
+   profile mxc "thumb" callback
+   elneo-client--reaction-cache elneo-client--reaction-pending))
 
 ;;;###autoload
 (defun elneo-avatars-flush-cache ()
