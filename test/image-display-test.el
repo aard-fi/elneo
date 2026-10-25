@@ -256,14 +256,16 @@ A video's play prefix is deliberately read-only, so plain
 
     ;; A file the helper rescues but create-image still chokes on
     ;; (corrupt copy) degrades too — the caller's error handler
-    ;; never faces a deleted placeholder.
+    ;; never faces a deleted placeholder.  The stub signals a plain
+    ;; error: `image-error' is not an Emacs condition, and a signal
+    ;; with an undefined symbol escapes every handler on Emacs 30.
     (with-current-buffer buffer
       (mx-reset)
       (mx-placeholder '((mimetype . "image/webp")) "x.png")
       (cl-letf (((symbol-function 'elneo--image-for-display)
                  (lambda (_path) "/cache/png"))
                 ((symbol-function 'create-image)
-                 (lambda (&rest _) (signal 'image-error '("corrupt")))))
+                 (lambda (&rest _) (signal 'error '("corrupt")))))
         (elneo-room--put-image mx-beg mx-end "/cache/png" "$ev"))
       (mx-check "put-image: a corrupt rescue degrades to the tag"
                 (buffer-string) "before [image: x.png] after"))

@@ -185,7 +185,7 @@ converts and a `create-image' answers a fake image glyph."
             ((symbol-function 'elneo--image-for-display)
              (lambda (_file) "/t/conv.png"))
             ((symbol-function 'create-image)
-             (lambda (&rest _) (signal 'image-error '("corrupt")))))
+             (lambda (&rest _) (signal 'error '("corrupt")))))
     (mx-check "cell: a corrupt sticker degrades to the tag"
               (elneo-room--reaction-image-cell "mxc://hs/doge")
               (propertize "[image react]"
@@ -227,7 +227,7 @@ converts and a `create-image' answers a fake image glyph."
             ((symbol-function 'elneo--image-for-display)
              (lambda (_file) "/t/conv.png"))
             ((symbol-function 'create-image)
-             (lambda (&rest _) (signal 'image-error '("corrupt")))))
+             (lambda (&rest _) (signal 'error '("corrupt")))))
     (mx-check "annotation: a corrupt thumbnail annotates with nothing"
               (elneo-room--reaction-annotation "mxc://hs/doge") nil))
 
