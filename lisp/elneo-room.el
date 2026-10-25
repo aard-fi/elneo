@@ -490,6 +490,23 @@ parent that is not loaded yet."
       (with-current-buffer pop-buf
         (message "%s" (buffer-string))))))
 
+(defun elneo-room-inspect-event-copy ()
+  "Copy the event properties at point to the kill ring.
+The same facts `elneo-room-inspect-event' pops up — event id,
+previous event id, the raw property value, the quote, and the
+seen timestamp — but as plain text in the kill ring, where no
+window manager can stand in the way."
+  (interactive)
+  (let* ((pos (point))
+         (id (elneo-room--event-id-at-point))
+         (prev (and (> pos (point-min)) (elneo-room--event-id-at (1- pos))))
+         (raw (get-text-property pos 'elneo-room-event-id))
+         (quote (get-text-property pos 'elneo-room-quote))
+         (seen (when id (gethash id elneo-room--seen))))
+    (kill-new (format "Event ID: %s\nPrev ID:  %s\nRaw Prop: %s\nQuote:    %s\nSeen:     %s"
+                      id prev raw quote seen))
+    (message "Event properties copied to the kill ring")))
+
 
 ;;; Window selection
 
