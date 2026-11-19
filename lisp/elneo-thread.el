@@ -212,7 +212,11 @@ the requesting view by `--page-callback'."
             (if (not elneo-room--backfilled)
                 (elneo-thread--render-first-page root-entry entries end)
               (setq elneo-room--loading-older nil)
-              (elneo-room--prepend-older-page entries end window))))))))
+              (elneo-room--prepend-older-page entries end window)
+              ;; A jump in progress re-checks after every older page,
+              ;; as in the room's history handler.
+              (when elneo-room--jump-target
+                (elneo-room--jump-drive)))))))))
 
 (defun elneo-thread--render-first-page (root-entry entries end)
   "Full render: header, pinned root quote, ENTRIES, input area.
