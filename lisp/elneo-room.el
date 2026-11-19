@@ -827,6 +827,11 @@ newest version always renders in place.  `=' pops them up.")
 (defvar-local elneo-room--jump-target nil
   "Buffer-local: event id a RET-on-quote jump is searching for.")
 
+(defvar-local elneo-room--jump-origin nil
+  "Buffer-local: marker where the latest jump was asked for.
+The landing pushes it on the mark ring, wherever point has moved
+while older pages were searched.")
+
 (defvar-local elneo-room--pending-jump-event-id nil
   "Buffer-local: event id to jump to once the first history page
 lands.  Set by `elneo-room-jump-to-event' for a room whose buffer
@@ -5325,18 +5330,21 @@ imports) must not yank it out of mid-draft typing."
 (defun elneo-room--prepend-older-page (entries end window)
   "Prepend an older history page at the top of the buffer.
 How the view lands depends on `elneo-room--older-mode': `anchor'
-keeps the first visible message stable (auto-load), `scroll'
-moves the view up a screen into the fresh page (PageUp, M-<)."
+keeps the view and point where they were (auto-load, reply jumps),
+`scroll' moves the view and point up a screen into the fresh page
+\(PageUp, M-<)."
   (let* ((page-mode (or elneo-room--older-mode 'anchor))
-         (at-end (and window (elneo-room--window-at-end-p window)))
-         (anchor-id (unless (or at-end (eq page-mode 'scroll))
-                      (elneo-room--first-visible-event-id window)))
-         ;; Landmark of the first visible line, for `scroll' mode.
-         (scroll-marker
-          (when (and window (eq page-mode 'scroll))
-            (let ((marker (copy-marker (window-start window) nil)))
-              (set-marker-insertion-type marker t)
-              marker))))
+         ;; Insertion-type t: a marker sitting exactly where the page
+         ;; goes in stays on its text below the page.
+         (start-marker (and window (copy-marker (window-start window) t)))
+         ;; The buffer's point, and each window's: on a screen reader
+         ;; a point moved by a page landing is a reader silently
+         ;; carried off what they were reading.
+         (point-marker (copy-marker (point) t))
+         (window-points
+          (mapcar (lambda (win)
+                    (cons win (copy-marker (window-point win) t)))
+                  (get-buffer-window-list nil nil t))))
     (let ((inhibit-read-only t))
       (save-excursion
         ;; The room's history begins at the very top; a thread view's
@@ -5372,20 +5380,25 @@ moves the view up a screen into the fresh page (PageUp, M-<)."
                                    (elneo-room--day below))))
               (elneo-room--insert-day-separator below))))))
     (setq elneo-room--end-token end)
-    (cond
-     ;; PageUp / M-<: put the old top line near the bottom of the
-     ;; window, so the fresh older page fills the screen above it.
-     (scroll-marker
-      (let ((target (save-excursion
-                      (goto-char (marker-position scroll-marker))
-                      (forward-line (- (window-body-height window)))
-                      (max (point-min) (point)))))
-        (set-window-start window target)
-        (set-window-point window target)))
-     (at-end (elneo-room--show-end window))
-     (anchor-id (elneo-room--restore-anchor anchor-id window)))
-    (when scroll-marker
-      (set-marker scroll-marker nil))
+    (goto-char point-marker)
+    (pcase-dolist (`(,win . ,marker) window-points)
+      (set-window-point win marker)
+      (set-marker marker nil))
+    (set-marker point-marker nil)
+    (when start-marker
+      (if (eq page-mode 'scroll)
+          ;; PageUp / M-<: put the old top line near the bottom of the
+          ;; window, so the fresh older page fills the screen above it.
+          (let ((target (save-excursion
+                          (goto-char (marker-position start-marker))
+                          (forward-line (- (window-body-height window)))
+                          (max (point-min) (point)))))
+            (set-window-start window target)
+            (set-window-point window target))
+        ;; NOFORCE: should point fall outside the view, redisplay
+        ;; moves the view rather than point.
+        (set-window-start window (marker-position start-marker) t))
+      (set-marker start-marker nil))
     ;; The older page may contain own messages already covered by a
     ;; known receipt: re-run the read-marks pass over the grown history.
     (elneo-room--apply-read-marks)
@@ -7147,8 +7160,11 @@ buffer the render resolved once for all sections."
 ;;; Jump to a reply's parent
 
 (defun elneo-room--jump-land (pos)
-  "Land a jump at POS: mark the old spot, move point and view there."
-  (push-mark pos)
+  "Land a jump at POS: mark where it was asked for, move point there."
+  (push-mark (or (and (markerp elneo-room--jump-origin)
+                      (marker-position elneo-room--jump-origin))
+                 (point))
+             t)
   (if-let* ((win (get-buffer-window (current-buffer) t)))
       (with-selected-window win
         (goto-char pos)
@@ -7160,6 +7176,7 @@ buffer the render resolved once for all sections."
   "Jump to event TARGET-ID, loading older pages first if needed.
 Already-rendered targets jump directly; otherwise bounded
 auto-pagination runs until it lands or history is exhausted."
+  (setq elneo-room--jump-origin (point-marker))
   (let ((pos (elneo-room--find-event target-id)))
     (cond
      (pos (elneo-room--jump-land pos))
