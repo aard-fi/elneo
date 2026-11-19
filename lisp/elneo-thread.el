@@ -230,9 +230,7 @@ below still read."
          (draft (if (> (length live-draft) 0)
                     live-draft
                   elneo-room--pending-draft))
-         (draft-offset (and elneo-room--backfilled
-                            (>= (point) (elneo-room--input-beg-pos))
-                            (- (point) (elneo-room--input-beg-pos)))))
+         (places (elneo-room--reader-places)))
     (let ((inhibit-read-only t))
       (erase-buffer))
     (setq elneo-room--seen (make-hash-table :test 'equal))
@@ -275,9 +273,7 @@ below still read."
     (setq elneo-room--pending-draft nil)
     (elneo-room--reset-input-area draft)
     (elneo-room--show-end window)
-    (when (and draft-offset window (eq window (selected-window)))
-      (goto-char (min (point-max)
-                      (+ (elneo-room--input-beg-pos) draft-offset))))))
+    (elneo-room--restore-reader-places places)))
 
 (defun elneo-thread--insert-root (root)
   "Pin the thread's ROOT (a message plist) as a quote at the view's top.
