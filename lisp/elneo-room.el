@@ -5501,6 +5501,19 @@ re-renders; the avatar cell then also kicks the deduped fetch)."
       (puthash event-id updated elneo-room--seen))
     changed))
 
+(defcustom elneo-room-point-on-new-message 'draft
+  "What point on a message does when a new message arrives in view.
+A message arrives in view when the room's window shows its end.
+Point in the draft is not affected by this option: it stays where
+it is, and the window scrolls to show the new message.
+Point on a message:
+`draft': moves to the end of the draft, and the window scrolls to
+show the new message.
+`keep': stays on that message, and the window does not scroll."
+  :group 'elneo-room
+  :type '(choice (const :tag "Move to the draft" draft)
+                 (const :tag "Stay on its message" keep)))
+
 (defun elneo-room--apply-new-message (buffer msg)
   "Append the daemon echo MSG to the history of BUFFER.
 A message already rendered — the send ack re-keyed the provisional
@@ -5535,7 +5548,9 @@ handler narrows to its root first, then lands here."
               (goto-char elneo-room--append-point)
               (elneo-room--append-messages (list msg))))
           (when was-at-end
-            (elneo-room--show-end window 'keep-point)
+            (unless (and (eq elneo-room-point-on-new-message 'keep)
+                         (< (window-point window) (elneo-room--input-beg-pos)))
+              (elneo-room--show-end window 'keep-point))
             (elneo-room--maybe-mark-read window)
             (elneo-room--fetch-media-in-window window)))))))
 
