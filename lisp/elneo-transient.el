@@ -79,6 +79,16 @@ explicit per-buffer override (`T' in the room) keep theirs."
   ;; elneo-room is not needed until the menu is used.
   (require 'elneo-room)
   (elneo-room--set-default-and-redraw 'elneo-room-trust-marks))
+
+(defun elneo-transient-toggle-embedded-images ()
+  "Toggle the rich-body embedded-images default, redrawing rooms.
+This is the default new room buffers follow; buffers with an
+explicit per-buffer override (`Y' in the room) keep theirs."
+  (interactive)
+  ;; Lazy require, mirroring elneo-transient-toggle-room-avatars:
+  ;; elneo-room is not needed until the menu is used.
+  (require 'elneo-room)
+  (elneo-room--set-default-and-redraw 'elneo-room-load-embedded-images))
 ;;;###autoload (autoload 'elneo-transient-dispatch "elneo-transient" nil t)
 (transient-define-prefix elneo-transient-dispatch ()
   "Room bar options: sorting, display modes, filters."
@@ -116,7 +126,10 @@ explicit per-buffer override (`T' in the room) keep theirs."
      elneo-transient-toggle-room-avatars :transient t)
     ("T" (lambda () (format "Trust marks: %s"
                             (if elneo-room-trust-marks "on" "off")))
-     elneo-transient-toggle-trust-marks :transient t)]
+     elneo-transient-toggle-trust-marks :transient t)
+    ("Y" (lambda () (format "Embedded rich-body images: %s"
+                            (if elneo-room-load-embedded-images "on" "off")))
+     elneo-transient-toggle-embedded-images :transient t)]
    ["Bar"
     ("k" (lambda () (format "Mouse click on a room: %s"
                             (pcase elneo-room-bar-click-action

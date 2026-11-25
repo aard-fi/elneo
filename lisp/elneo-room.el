@@ -403,6 +403,9 @@ parent that is not loaded yet."
         (define-key map (kbd "t") #'elneo-room--t)
         (define-key map (kbd "y") #'elneo-room--y)
         (define-key map (kbd "T") #'elneo-room--T)
+        ;; `Y' pairs with `y': the rich-body image sub-setting of the
+        ;; rich rendering `y' toggles.
+        (define-key map (kbd "Y") #'elneo-room--Y)
         (define-key map (kbd "A") #'elneo-room--A)
         ;; telega saves media with `s'; S stays as an alias.
         (define-key map (kbd "s") #'elneo-room--s)
@@ -1801,10 +1804,13 @@ Element's custom emoji and stickers arrive as `<img>' tags inside
 formatted bodies.  Non-nil fetches them through the daemon's
 authenticated media download — `mxc://' sources only, cached on
 disk like message thumbnails, never loaded when the placeholder
-scrolls into view repeatedly.  nil (the default) renders a dim
-[image] marker instead.  http(s) URLs never load in either
-setting: they would tell an arbitrary web server who opened the
-message and when."
+scrolls into view repeatedly — and renders each image on its own
+line under the message, sized from the tag's height attribute
+(capped at four text lines, two when the tag declares none).  nil
+(the default) renders a dim [image] marker instead.  http(s) URLs
+never load in either setting: they would tell an arbitrary web
+server who opened the message and when.  `Y' toggles the current
+buffer, leaving this default untouched."
   :group 'elneo-room
   :type 'boolean)
 
@@ -1818,16 +1824,32 @@ message and when."
   "The placeholder text standing in for rich body image number N."
   (format "⟦img %d⟧" n))
 
+(defun elneo-room--rich-image-height (declared)
+  "Pixel height cap for a rich-body image.
+DECLARED is the `<img>' tag's height attribute, or nil.  A
+declared height is honored (Element sizes its emotes in the
+tag), capped at four text lines so a sticker cannot eat the
+screen; without one the image renders two text lines tall, the
+reaction-image size.  Always a number: placeholders carry a
+numeric `elneo-room-media-height', so callers need no nil case."
+  (min (or declared (* 2 (default-font-height)))
+       (* 4 (default-font-height))))
+
 (defun elneo-room--rich-node (node srcs)
   "Rebuild one DOM node with <img> elements replaced by markers.
 Returns (NODE . SRCS): the rebuilt node and the numbered list of
-the replaced elements' src attributes, in order."
+the replaced elements' src and height attributes, in order."
   (cond
-   ;; An <img>: swap in a marker, remember its src.
+   ;; An <img>: swap in a marker, remember its src and height.
    ((and (consp node) (eq (car node) 'img))
-    (let ((src (cdr (assq 'src (cadr node)))))
+    (let* ((attrs (cadr node))
+           (src (cdr (assq 'src attrs)))
+           (height (cdr (assq 'height attrs)))
+           (num (and height (string-to-number height)))
+           (height (and num (> num 0) num)))
       (cons (elneo-room--rich-img-marker (1+ (length srcs)))
-            (append srcs (list src)))))
+            (append srcs (list `((src . ,src)
+                                 (height . ,height)))))))
    ;; A node list (what libxml hands back at top level): walk it as
    ;; the children of one synthetic element.
    ((and (consp node) (consp (car node)))
@@ -1849,7 +1871,9 @@ the replaced elements' src attributes, in order."
   "Insert MSG's formatted body at point, rendered by shr.
 Images become placeholders; with
 `elneo-room-load-embedded-images' on, `mxc://' ones carry the
-media properties the thumbnail pipeline fetches on scroll.  The
+media properties the thumbnail pipeline fetches on scroll, the
+fetched image later replacing the span from its own line under
+this one.  The
 whole region carries `elneo-room-rich-block' with the event id,
 so `elneo-room--replace-message' can delete a multi-line body
 (something only rich bodies produce) as one block."
@@ -1908,7 +1932,8 @@ so `elneo-room--replace-message' can delete a multi-line body
       (goto-char start)
       (while (re-search-forward "⟦img +\\([0-9]+\\)⟧" finish t)
         (let* ((n (string-to-number (match-string 1)))
-               (src (nth (1- n) srcs))
+               (spec (nth (1- n) srcs))
+               (src (cdr (assq 'src spec)))
                (inhibit-read-only t))
           (replace-match
            (if (and src (string-prefix-p "mxc://" src)
@@ -1918,7 +1943,8 @@ so `elneo-room--replace-message' can delete a multi-line body
                ;; collides with the block's own id run.  The
                ;; scroll-pass fetcher downloads it like a message
                ;; thumbnail and `elneo-room--on-media' replaces the
-               ;; span; several images per message load in sequence.
+               ;; span, moving the image to its own line under this
+               ;; one; several images per message load in sequence.
                (propertize "[image]"
                            'face 'shadow
                            'elneo-room-media t
@@ -1926,6 +1952,12 @@ so `elneo-room--replace-message' can delete a multi-line body
                            'elneo-room-media-data `((source (url . ,src)))
                            'elneo-room-media-name
                            (file-name-nondirectory src)
+                           'elneo-room-media-rich t
+                           'elneo-room-media-base-id event-id
+                           'elneo-room-media-index n
+                           'elneo-room-media-height
+                           (elneo-room--rich-image-height
+                            (cdr (assq 'height spec)))
                            'elneo-room-event-id
                            (concat event-id "#img" (number-to-string n)))
              ;; Not loadable (or an http(s) URL: never fetch those):
@@ -1985,6 +2017,15 @@ drop the buffer-local override so the buffer follows the global
 `elneo-room-trust-marks' again."
   (interactive "P")
   (elneo-room--toggle-display 'elneo-room-trust-marks "Trust marks" arg))
+
+(defun elneo-room-toggle-embedded-images (&optional arg)
+  "Toggle loading of rich-body embedded images in this room buffer.
+With no ARG flip the current buffer's value; with any non-nil ARG
+drop the buffer-local override so the buffer follows the global
+`elneo-room-load-embedded-images' again."
+  (interactive "P")
+  (elneo-room--toggle-display 'elneo-room-load-embedded-images
+                              "Embedded images" arg))
 
 (defun elneo-room--rebuild-trust-buffers ()
   "Re-render every open room buffer that shows trust marks.
@@ -3012,6 +3053,10 @@ image viewer: elneo-thread needs this file's buffer-locals."
 (elneo-room--defkey elneo-room--T ?T
   "Toggle sender trust marks."
   (call-interactively #'elneo-room-toggle-trust-marks))
+
+(elneo-room--defkey elneo-room--Y ?Y
+  "Toggle loading of rich-body embedded images."
+  (call-interactively #'elneo-room-toggle-embedded-images))
 
 ;; telega's save key; S remains as an alias.
 (elneo-room--defkey elneo-room--s ?s
@@ -7626,8 +7671,11 @@ what string event ids need."
           (if (and (alist-get '@ok event nil nil #'equal)
                    (alist-get 'path event))
               (condition-case err
-                  (elneo-room--put-image
-                   beg end (alist-get 'path event) event-id)
+                  (if (get-text-property beg 'elneo-room-media-rich)
+                      (elneo-room--put-rich-image
+                       beg end (alist-get 'path event))
+                    (elneo-room--put-image
+                     beg end (alist-get 'path event) event-id))
                 (error (message "Matrix image render failed: %s" (cdr err))))
             (let ((inhibit-read-only t)
                   ;; Read before the delete: the char at BEG after it is
@@ -7660,6 +7708,117 @@ with the message, not orphaned under the fresh render."
               (elneo-room--indent-newlines
                (elneo-room--linkify-string caption)))
       'elneo-room-event-id event-id))))
+
+(defun elneo-room--put-rich-image (beg end file)
+  "Replace the rich-body image placeholder BEG..END with FILE's image.
+The message's base id (the placeholder's
+`elneo-room-media-base-id') stamps the image line, not the span's
+synthetic one.  Unlike a message thumbnail the image does not
+render inline: shr already flowed the sentence around the
+placeholder, and an inline cell would strand the text on either
+side of it.  The span dies — the sentence closes up — and the
+image renders on its own line under it, indented to the body
+column like a media caption, sized to the placeholder's
+`elneo-room-media-height'.  Sibling image lines that landed
+earlier are skipped, keeping several images per message in
+sentence order despite out-of-order fetches.  `o'/`s' keep
+working: the media properties ride on the image's alt text like in
+`put-image'.  `elneo-room-media-thumb' is never set on the
+inserted line, so the scanner does not re-fetch it.
+
+Block membership is the caption-line rule, with one twist: a line
+below the message's last body line carries the base event id (the
+`block-bounds' down-walk covers it), but a line landing mid-block
+— a wrapped rich body's earlier line — carries only the
+whole-block properties.  An event id there would come before the
+last body line and hijack `elneo-room--find-event', which must
+land on the last line for the reaction and remove paths."
+  (let* ((media (get-text-property beg 'elneo-room-media-data))
+         (name (get-text-property beg 'elneo-room-media-name))
+         (base-id (get-text-property beg 'elneo-room-media-base-id))
+         (index (get-text-property beg 'elneo-room-media-index))
+         (height (get-text-property beg 'elneo-room-media-height))
+         ;; The image exists before the delete: a create failure must
+         ;; not strand a deleted placeholder.
+         (display (elneo--image-for-display file))
+         (img (condition-case nil
+                  (when display
+                    (create-image display nil nil :ascent 100
+                                  :max-height (or height
+                                                  (* 2 (default-font-height)))
+                                  :max-width 320))
+                (error nil)))
+         (inhibit-read-only t))
+    (save-excursion
+      (delete-region beg end)
+      (goto-char beg)
+      (goto-char (line-end-position))
+      ;; The first char of the line below point; nil at the buffer's
+      ;; end.  Point sits on the line's newline when there is one, so
+      ;; the next line starts one char on.
+      (let ((below (lambda ()
+                     (when (< (point) (point-max)) (1+ (point))))))
+        ;; Sibling image lines that landed first: skip the ones this
+        ;; image follows in the sentence, so the lines stay in
+        ;; sentence order.
+        (while (let ((next (funcall below)))
+                 (and next
+                      (get-text-property next 'elneo-room-rich-image)
+                      (< (get-text-property next 'elneo-room-media-index)
+                         (or index 0))))
+          (forward-line 1)
+          (goto-char (line-end-position))))
+      (let* ((line-beg (point))
+             ;; First line below past any sibling image lines, in
+             ;; either sentence direction: the classification must
+             ;; see the block's next body line, not a sibling's
+             ;; image line, or an out-of-order landing would stamp
+             ;; this line with the block id and hijack find-event.
+             (below (save-excursion
+                      (while (and (< (line-end-position) (point-max))
+                                  (get-text-property (1+ (point))
+                                                     'elneo-room-rich-image))
+                        (forward-line 1))
+                      (when (< (line-end-position) (point-max))
+                        (1+ (point)))))
+             ;; Mid-block: the line below is a continuation of this
+             ;; message's rich body, its stamps marking the block;
+             ;; a sibling image line never does.
+             (mid-block
+              (and below
+                   (equal (or (get-text-property below 'elneo-room-msg-block)
+                              (get-text-property below
+                                                 'elneo-room-rich-block))
+                          base-id))))
+        (insert "\n" (make-string (elneo-room--body-column) ?\s))
+        (if img
+            (insert-image
+             img
+             (propertize "[image]"
+                         'elneo-room-media (when media t)
+                         'elneo-room-media-data media
+                         'elneo-room-media-name name
+                         'read-only t))
+          ;; No display: the span is gone, a dim tag keeps the media
+          ;; findable.
+          (insert (propertize "[image]"
+                              'face 'shadow
+                              'elneo-room-media (when media t)
+                              'elneo-room-media-data media
+                              'elneo-room-media-name name)))
+        ;; Line stamps: the whole run is the image line, so a sibling
+        ;; probe (or `o'/`s' at any position of it) sees the facts.
+        (put-text-property line-beg (point)
+                           'elneo-room-msg-block base-id)
+        (put-text-property line-beg (point)
+                           'elneo-room-rich-block base-id)
+        (put-text-property line-beg (point)
+                           'elneo-room-rich-image t)
+        (put-text-property line-beg (point)
+                           'elneo-room-media-index index)
+        (unless mid-block
+          (put-text-property line-beg (point)
+                             'elneo-room-event-id base-id))))))
 
 (defun elneo-room--put-image (beg end file event-id)
   "Replace BEG..END with the image stored at FILE.
