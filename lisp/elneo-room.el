@@ -924,9 +924,8 @@ content; invalidate so the next (re-)entry fetches fresh history."
                  (setq elneo-room--backfilled nil
                        elneo-room--end-token nil
                        elneo-room--history-retries 0
-                       elneo-room--jump-target nil
-                       elneo-room--jump-pages 0
                        elneo-room--notice nil)
+                 (elneo-room--jump-stop)
                  (when (hash-table-p elneo-room--reactions)
                    (clrhash elneo-room--reactions))
                  ;; Receipt state is daemon-side too: the seed pass
@@ -952,9 +951,8 @@ content; invalidate so the next (re-)entry fetches fresh history."
                  (setq elneo-room--backfilled nil
                        elneo-room--end-token nil
                        elneo-room--history-retries 0
-                       elneo-room--jump-target nil
-                       elneo-room--jump-pages 0
                        elneo-room--notice nil)
+                 (elneo-room--jump-stop)
                  (when (hash-table-p elneo-room--reactions)
                    (clrhash elneo-room--reactions))
                  (setq elneo-room--read-check-id nil)
@@ -5321,8 +5319,7 @@ imports) must not yank it out of mid-draft typing."
             (setq elneo-room--seen (make-hash-table :test 'equal))
             (when (hash-table-p elneo-room--reactions)
               (clrhash elneo-room--reactions))
-            (setq elneo-room--jump-target nil
-                  elneo-room--jump-pages 0)
+            (elneo-room--jump-stop)
             (elneo-room--header (elneo-room-get elneo-room--profile elneo-room--room-id))
             (goto-char (point-max))
             (elneo-room--append-messages entries)
@@ -7252,13 +7249,11 @@ bounds it."
     (setq elneo-room--jump-pages (1+ elneo-room--jump-pages))
     (cond
      (pos
-      (setq elneo-room--jump-target nil
-            elneo-room--jump-pages 0)
+      (elneo-room--jump-stop)
       (elneo-room--jump-land pos))
      ((or (null elneo-room--end-token)
           (>= elneo-room--jump-pages elneo-room-jump-page-limit))
-      (setq elneo-room--jump-target nil
-            elneo-room--jump-pages 0)
+      (elneo-room--jump-stop)
       (message "Matrix: could not find the referenced message in nearby history"))
      (t
       (elneo-room--jump-next-page)))))
