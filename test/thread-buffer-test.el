@@ -629,6 +629,44 @@
                           (list 1 1))))))
         (kill-buffer buf)
 
+        ;; --- RET on a quote whose parent is on an older thread page ---
+        ;; The jump pages through the thread's own fetches until the
+        ;; parent lands.
+        (progn
+          (clrhash elneo-thread--buffers)
+          (setq buf (mx-open root-entry))
+          (let ((fetches nil))
+            (cl-letf (((symbol-function 'elneo-room-thread-messages)
+                       (lambda (_p _room _root _limit from _cb)
+                         (push from fetches))))
+              (with-current-buffer buf
+                (elneo-thread--on-history
+                 "mxtest"
+                 (mx-page nil (list (append (mx-entry "$rJ" "@b:mx.org"
+                                                      "late answer" 30 "$root")
+                                            (list (cons 'reply_to "$mid"))))
+                          "tokJ1"))
+                (goto-char (point-max))
+                (search-backward "older message")
+                (elneo-room--ret)
+                (mx-check "the jump asks for an older thread page"
+                          fetches '("tokJ1"))
+                (elneo-thread--on-history
+                 "mxtest"
+                 (mx-page nil (list (mx-entry "$x1" "@b:mx.org" "filler" 20
+                                              "$root"))
+                          "tokJ2"))
+                (mx-check "a page without the parent asks for the next"
+                          fetches '("tokJ2" "tokJ1"))
+                (elneo-thread--on-history
+                 "mxtest"
+                 (mx-page nil (list (mx-entry "$mid" "@b:mx.org" "the middle" 10
+                                              "$root"))
+                          "tokJ3"))
+                (mx-check "the jump lands on the parent"
+                          (elneo-room--event-id-enclosing (point)) "$mid")))))
+        (kill-buffer buf)
+
     ;; cleanup: every created buffer and registry leftover
     (let ((inhibit-quit t))
       (dolist (b (buffer-list))
