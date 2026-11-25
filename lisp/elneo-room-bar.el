@@ -1019,14 +1019,39 @@ row group tracking) to hold on to across re-renders."
   "Re-render the whole room bar."
   (interactive)
   (elneo-room-bar--ensure)
-  ;; Remember where the bar window's view sits (by room row), so the
-  ;; re-render does not yank the visible part of the list around.
-  (let* ((window (get-buffer-window elneo-room-bar--buffer (selected-frame)))
-         (view (and window
-                    (with-current-buffer elneo-room-bar--buffer
-                      (list (get-text-property (window-point window) 'elneo-room-key)
-                            (get-text-property (window-start window) 'elneo-room-key))))))
-    (with-current-buffer elneo-room-bar--buffer
+  ;; Remember every place kept in the bar by the room row under it, so
+  ;; the re-render puts each back on its row: the buffer's point, each
+  ;; window's point and start on every frame, and the places windows
+  ;; keep for the bar while showing something else, which
+  ;; `switch-to-prev-buffer' (`q' in a room opened from the bar)
+  ;; returns to.  The erase would collapse them all to the top.
+  (let* ((buffer elneo-room-bar--buffer)
+         ;; Text under a row with no key of its own -- an empty
+         ;; preview line, the end of a preview -- is the row above's.
+         (key-at (lambda (pos)
+                   (with-current-buffer buffer
+                     (or (get-text-property pos 'elneo-room-key)
+                         (and (> pos (point-min))
+                              (or (get-text-property (1- pos) 'elneo-room-key)
+                                  (let ((row (previous-single-property-change
+                                              pos 'elneo-room-key)))
+                                    (and row (> row (point-min))
+                                         (get-text-property
+                                          (1- row) 'elneo-room-key)))))))))
+         (point-key (with-current-buffer buffer (funcall key-at (point))))
+         (windows (mapcar (lambda (win)
+                            (list win
+                                  (funcall key-at (window-point win))
+                                  (funcall key-at (window-start win))))
+                          (get-buffer-window-list buffer nil t)))
+         (kept (let (acc)
+                 (dolist (win (window-list-1 nil 'nomini t))
+                   (pcase-dolist (`(,b ,start ,pos) (window-prev-buffers win))
+                     (when (eq b buffer)
+                       (push (cons start (funcall key-at start)) acc)
+                       (push (cons pos (funcall key-at pos)) acc))))
+                 acc)))
+    (with-current-buffer buffer
       (let ((inhibit-read-only t)
             (rooms (elneo-room-bar--visible-rooms)))
         (erase-buffer)
@@ -1088,17 +1113,19 @@ row group tracking) to hold on to across re-renders."
           (unless elneo-room-bar-grouped
             (dolist (room rooms)
               (elneo-room-bar--put-row room))))
-        ;; Restore the view: point back on the room it was on, window top
-        ;; back on its old top row (both fall back to the list start).
-        (when window
-          (let ((point-marker (and (nth 0 view)
-                                   (gethash (nth 0 view) elneo-room-bar--markers)))
-                (start-marker (and (nth 1 view)
-                                   (gethash (nth 1 view) elneo-room-bar--markers))))
-            (set-window-start window (or (and start-marker (marker-position start-marker))
-                                         (point-min)))
-            (set-window-point window (or (and point-marker (marker-position point-marker))
-                                         (point-min)))))
+        ;; Restore the places: each back on the room it was on, window
+        ;; tops back on their old top rows (all fall back to the list
+        ;; start).
+        (let ((row (lambda (key)
+                     (let ((marker (and key (gethash key elneo-room-bar--markers))))
+                       (if marker (marker-position marker) (point-min))))))
+          (goto-char (funcall row point-key))
+          (pcase-dolist (`(,win ,pos-key ,start-key) windows)
+            (when (window-live-p win)
+              (set-window-start win (funcall row start-key))
+              (set-window-point win (funcall row pos-key))))
+          (pcase-dolist (`(,marker . ,key) kept)
+            (set-marker marker (funcall row key))))
         (set-buffer-modified-p nil)))))
 
 (defun elneo-room-bar--on-session-state (_profile &optional _enabled _trusted)
