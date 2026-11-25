@@ -5196,9 +5196,13 @@ failure as a notice instead of just staying empty."
   (setq elneo-room--loading-older nil)
   (if elneo-room--backfilled
       ;; The page in flight was an older page; live content is on
-      ;; display, so only the echo area mentions the failure.
-      (message "Matrix [%s] history page failed: %s" elneo-room--profile
-               (elneo-server--error-string event))
+      ;; display, so only the echo area mentions the failure.  A jump
+      ;; it was searching for ends here, or the next page loaded for
+      ;; any reason would resume it.
+      (progn
+        (elneo-room--jump-stop)
+        (message "Matrix [%s] history page failed: %s" elneo-room--profile
+                 (elneo-server--error-string event)))
     (elneo-room--set-notice
      (format "History failed: %s — C-c C-r refetches"
              (elneo-server--error-string event)))
@@ -7244,6 +7248,8 @@ bounds it."
   "Continue a pending jump after an older page landed."
   (let ((pos (and elneo-room--jump-target
                   (elneo-room--find-event elneo-room--jump-target))))
+    ;; Counted on landing, so the limit is the pages fetched.
+    (setq elneo-room--jump-pages (1+ elneo-room--jump-pages))
     (cond
      (pos
       (setq elneo-room--jump-target nil
@@ -7255,8 +7261,12 @@ bounds it."
             elneo-room--jump-pages 0)
       (message "Matrix: could not find the referenced message in nearby history"))
      (t
-      (setq elneo-room--jump-pages (1+ elneo-room--jump-pages))
       (elneo-room--jump-next-page)))))
+
+(defun elneo-room--jump-stop ()
+  "End a pending jump."
+  (setq elneo-room--jump-target nil
+        elneo-room--jump-pages 0))
 
 (defun elneo-room-jump-to-event (profile room-id event-id &optional stay-put)
   "Open PROFILE's ROOM-ID and put point on EVENT-ID.

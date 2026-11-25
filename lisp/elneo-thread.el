@@ -170,6 +170,8 @@ its page — its older pages are re-tried by the top-of-buffer pager,
 and this only clears the pager's in-flight latch."
   (message "Matrix [%s] thread fetch failed: %s"
            elneo-room--profile (elneo-server--error-string event))
+  ;; As for a room page: a pending jump ends with the fetch.
+  (elneo-room--jump-stop)
   (setq elneo-room--loading-older nil)
   (when (and (null elneo-room--backfilled)
              (< elneo-room--history-retries 3))
