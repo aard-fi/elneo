@@ -4773,6 +4773,10 @@ The in-memory store updates immediately; only the disk write waits."
 `elneo-room--render-first-page' moves it into the input area once
 the first history page lands.")
 
+(defvar-local elneo-room--kept-places nil
+  "Buffer-local: reader places a refetch noted before emptying the
+buffer, for the render of its page (`elneo-room--reader-places').")
+
 (defun elneo-room--draft-read-entries (file)
   "Load the alist of drafts from FILE into the store.
 Signals on a malformed file; the caller decides how loud to be."
@@ -5167,6 +5171,70 @@ end on every live append."
               (setq start (point))
               (set-window-start window start))))))))
 
+(defun elneo-room--place-at (pos)
+  "Where POS is, in terms that survive a re-render, or nil.
+\(draft . OFFSET) in the draft area; otherwise (EVENT-ID . OFFSET)
+from the start of the message block holding POS, or of the next
+block for a position between blocks (OFFSET is then negative)."
+  (let ((input (elneo-room--input-beg-pos)))
+    (if (>= pos input)
+        (cons 'draft (- pos input))
+      ;; A block's event id rides its last line, so the first id at
+      ;; or after POS is the block holding it.  Quote lines may carry
+      ;; synthetic ids; only messages in the seen table count.
+      (let ((at pos) id)
+        (while (and (< at input) (not id))
+          (let ((here (get-text-property at 'elneo-room-event-id)))
+            (if (and here (gethash here elneo-room--seen))
+                (setq id here)
+              (setq at (next-single-property-change
+                        at 'elneo-room-event-id nil input)))))
+        (when-let* ((bounds (and id (elneo-room--block-bounds id))))
+          (cons id (- pos (car bounds))))))))
+
+(defun elneo-room--place-pos (place)
+  "Position of PLACE (see `elneo-room--place-at') now, or nil."
+  (pcase place
+    (`(draft . ,offset)
+     (min (point-max) (+ (elneo-room--input-beg-pos) offset)))
+    (`(,id . ,offset)
+     (when-let* ((bounds (elneo-room--block-bounds id)))
+       (max (point-min) (min (+ (car bounds) offset)
+                             (max (car bounds) (1- (cdr bounds)))))))))
+
+(defun elneo-room--reader-places ()
+  "Places of this buffer's point and every window's, or nil.
+nil too when no message is rendered: there is no reader to keep.
+The car is the buffer's place, the cdr (WINDOW . PLACE) pairs."
+  (when (text-property-not-all (point-min) (point-max)
+                               'elneo-room-msg-block nil)
+    (cons (elneo-room--place-at (point))
+          (mapcar (lambda (win)
+                    (cons win (elneo-room--place-at (window-point win))))
+                  (get-buffer-window-list nil nil t)))))
+
+(defun elneo-room--restore-reader-places (places)
+  "Put point and window points back on PLACES after a re-render.
+A message that is no longer rendered — a refetch keeps only the
+newest page — falls back to the oldest one that is, the nearest to
+where the reader was."
+  (when places
+    (let ((fallback
+           (lambda ()
+             (when-let* ((oldest (car (elneo-room--ordered-event-ids)))
+                         (bounds (elneo-room--block-bounds oldest)))
+               (car bounds)))))
+      (when-let* ((pos (and (car places)
+                            (or (elneo-room--place-pos (car places))
+                                (funcall fallback)))))
+        (goto-char pos))
+      (pcase-dolist (`(,win . ,place) (cdr places))
+        (when-let* ((pos (and place (window-live-p win)
+                              (eq (window-buffer win) (current-buffer))
+                              (or (elneo-room--place-pos place)
+                                  (funcall fallback)))))
+          (set-window-point win pos))))))
+
 (defun elneo-room--restore-anchor (event-id window)
   "Reposition WINDOW so the message EVENT-ID sits at the top.
 Falls back to the end of the buffer when EVENT-ID is gone."
@@ -5248,7 +5316,8 @@ notices (`--history-failed', the render error path) point here."
         elneo-room--backfilled nil
         elneo-room--end-token nil
         elneo-room--history-retries 0
-        elneo-room--loading-older nil)
+        elneo-room--loading-older nil
+        elneo-room--kept-places (elneo-room--reader-places))
   (let ((inhibit-read-only t))
     (erase-buffer))
   (elneo-room--backfill 50))
@@ -5285,20 +5354,22 @@ without room_id, routed to the requesting view by
 
 (defun elneo-room--render-first-page (entries end window)
   "Full re-render: header, ENTRIES, then the input area.
-The reader's position is kept via event-id anchoring; the draft
-survives the re-render (used by the room-keys backfill too).  A
-cursor inside the draft is kept as well: spontaneous re-renders
-\(room keys arriving — common right after a fresh session's key
-imports) must not yank it out of mid-draft typing."
+The view is kept via event-id anchoring; the draft survives the
+re-render (used by the room-keys backfill too).  Point, the
+buffer's and every window's, goes back to where it was in its
+message or in the draft (`elneo-room--reader-places'): spontaneous
+re-renders (room keys arriving — common right after a fresh
+session's key imports) must not carry a reader off what they were
+reading, or yank a cursor out of mid-draft typing."
   (let* ((at-end (or (null window) (elneo-room--window-at-end-p window)))
          (anchor-id (unless at-end (elneo-room--first-visible-event-id window)))
          (live-draft (elneo-room--draft-text))
          (draft (if (> (length live-draft) 0)
                     live-draft
                   elneo-room--pending-draft))
-         (draft-offset (and elneo-room--backfilled
-                            (>= (point) (elneo-room--input-beg-pos))
-                            (- (point) (elneo-room--input-beg-pos)))))
+         (places (or (elneo-room--reader-places)
+                     elneo-room--kept-places)))
+    (setq elneo-room--kept-places nil)
     (when elneo-room--keys-timer
       (cancel-timer elneo-room--keys-timer)
       (setq elneo-room--keys-timer nil))
@@ -5347,13 +5418,8 @@ imports) must not yank it out of mid-draft typing."
             (format "History render failed: %s — C-c C-r refetches" err))
            (elneo-room--reset-input-area draft))
          (message "Matrix [%s] history render failed: %s" elneo-room--profile err))))
-    ;; Return the cursor to where it was inside the draft.  Only for
-    ;; the selected window — there the window's point is the buffer's,
-    ;; and only a typing cursor is worth preserving.  A pending jump
-    ;; still wins; it runs after this.
-    (when (and draft-offset (eq window (selected-window)))
-      (goto-char (min (point-max)
-                      (+ (elneo-room--input-beg-pos) draft-offset))))
+    ;; A pending jump still wins; it runs after this.
+    (elneo-room--restore-reader-places places)
     ;; An alert-initiated jump into a fresh buffer: the first page and
     ;; end-token exist now, so run the pending jump — it paginates
     ;; further back through `elneo-room--jump-drive' when the target
